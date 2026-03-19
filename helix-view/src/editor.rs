@@ -727,7 +727,7 @@ pub enum StatusLineElement {
 // Cursor shape is read and used on every rendered frame and so needs
 // to be fast. Therefore we avoid a hashmap and use an enum indexed array.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CursorShapeConfig([CursorKind; 3]);
+pub struct CursorShapeConfig([CursorKind; 2]);
 
 impl CursorShapeConfig {
     pub fn from_mode(&self, mode: Mode) -> CursorKind {
@@ -745,7 +745,6 @@ impl<'de> Deserialize<'de> for CursorShapeConfig {
         Ok(CursorShapeConfig([
             into_cursor(Mode::Normal),
             into_cursor(Mode::Select),
-            into_cursor(Mode::Insert),
         ]))
     }
 }
@@ -756,7 +755,7 @@ impl Serialize for CursorShapeConfig {
         S: serde::Serializer,
     {
         let mut map = serializer.serialize_map(Some(self.len()))?;
-        let modes = [Mode::Normal, Mode::Select, Mode::Insert];
+        let modes = [Mode::Normal, Mode::Select];
         for mode in modes {
             map.serialize_entry(&mode, &self.from_mode(mode))?;
         }
@@ -765,7 +764,7 @@ impl Serialize for CursorShapeConfig {
 }
 
 impl std::ops::Deref for CursorShapeConfig {
-    type Target = [CursorKind; 3];
+    type Target = [CursorKind; 2];
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -774,7 +773,7 @@ impl std::ops::Deref for CursorShapeConfig {
 
 impl Default for CursorShapeConfig {
     fn default() -> Self {
-        Self([CursorKind::Block; 3])
+        Self([CursorKind::Block; 2])
     }
 }
 

@@ -24,7 +24,7 @@ use crate::job;
 
 pub(super) fn register_hooks(handlers: &Handlers) {
     register_hook!(move |event: &mut DiagnosticsDidChange<'_>| {
-        if event.editor.mode != Mode::Insert {
+        if event.editor.mode != Mode::Normal {
             for (view, _) in event.editor.tree.views_mut() {
                 send_blocking(&view.diagnostics_handler.events, DiagnosticEvent::Refresh)
             }
@@ -33,7 +33,7 @@ pub(super) fn register_hooks(handlers: &Handlers) {
     });
     register_hook!(move |event: &mut OnModeSwitch<'_, '_>| {
         for (view, _) in event.cx.editor.tree.views_mut() {
-            view.diagnostics_handler.active = event.new_mode != Mode::Insert;
+            view.diagnostics_handler.active = event.new_mode != Mode::Normal;
         }
         Ok(())
     });

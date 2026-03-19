@@ -484,7 +484,7 @@ mod tests {
                 > 1
         );
         assert!(!merged_keyamp
-            .get(&Mode::Insert)
+            .get(&Mode::Normal)
             .and_then(|key_trie| key_trie.node())
             .unwrap()
             .is_empty());

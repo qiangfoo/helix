@@ -171,10 +171,9 @@ pub fn line_numbers<'doc>(
                 write!(out, "{:>1$}", '~', width).unwrap();
                 Some(linenr)
             } else {
-                use crate::{document::Mode, editor::LineNumber};
+                use crate::editor::LineNumber;
 
                 let relative = line_number == LineNumber::Relative
-                    && mode != Mode::Insert
                     && is_focused
                     && current_line != line;
 

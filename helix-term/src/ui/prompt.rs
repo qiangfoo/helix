@@ -787,7 +787,7 @@ impl Component for Prompt {
 
         (
             Some(Position::new(area.y as usize + line, col)),
-            editor.config().cursor_shape.from_mode(Mode::Insert),
+            editor.config().cursor_shape.from_mode(Mode::Normal),
         )
     }
 }

@@ -155,10 +155,6 @@ mod tests {
         merge_keys(
             &mut keys,
             hashmap! {
-                Mode::Insert => keymap!({ "Insert mode"
-                    "y" => move_line_down,
-                    "S-C-a" => delete_selection,
-                }),
                 Mode::Normal => keymap!({ "Normal mode"
                     "A-F12" => move_next_word_end,
                 }),

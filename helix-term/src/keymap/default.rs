@@ -138,7 +138,7 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
 
         "A-:" => ensure_selections_forward,
 
-        "esc" => normal_mode,
+        "esc" => exit_select_mode,
         "C-b" | "pageup" => page_up,
         "C-f" | "pagedown" => page_down,
         "C-u" => page_cursor_half_up,
@@ -279,7 +279,7 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
         "end" => extend_to_line_end,
         "esc" => exit_select_mode,
 
-        "v" => normal_mode,
+        "v" => exit_select_mode,
         "g" => { "Goto"
             "g" => extend_to_file_start,
             "|" => extend_to_column,
@@ -289,12 +289,8 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "w" => extend_to_word,
         },
     }));
-    let insert = keymap!({ "Insert mode"
-        "esc" => normal_mode,
-    });
     hashmap!(
         Mode::Normal => normal,
         Mode::Select => select,
-        Mode::Insert => insert,
     )
 }

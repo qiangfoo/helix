@@ -183,7 +183,7 @@ pub fn show_signature_help(
     // annoyance, see https://github.com/helix-editor/helix/issues/3112
     // For the most part this should not be needed as the request gets canceled automatically now
     // but it's technically possible for the mode change to just preempt this callback so better safe than sorry
-    if invoked == SignatureHelpInvoked::Automatic && editor.mode != Mode::Insert {
+    if invoked == SignatureHelpInvoked::Automatic && editor.mode != Mode::Normal {
         return;
     }
 
@@ -316,13 +316,13 @@ pub(super) fn register_hooks(handlers: &Handlers) {
     let tx = handlers.signature_hints.clone();
     register_hook!(move |event: &mut OnModeSwitch<'_, '_>| {
         match (event.old_mode, event.new_mode) {
-            (Mode::Insert, _) => {
+            (Mode::Normal, _) => {
                 send_blocking(&tx, SignatureHelpEvent::Cancel);
                 event.cx.callback.push(Box::new(|compositor, _| {
                     compositor.remove(SignatureHelp::ID);
                 }));
             }
-            (_, Mode::Insert) => {
+            (_, Mode::Normal) => {
                 if event.cx.editor.config().lsp.auto_signature_help {
                     send_blocking(&tx, SignatureHelpEvent::Trigger);
                 }

@@ -68,7 +68,7 @@ impl helix_event::AsyncHook for AutoSaveHandler {
     fn finish_debounce(&mut self) {
         let save_pending = self.save_pending.clone();
         job::dispatch_blocking(move |editor, _| {
-            if editor.mode() == Mode::Insert {
+            if editor.mode() == Mode::Normal {
                 // Avoid saving while in insert mode since this mixes up
                 // the modification indicator and prevents future saves.
                 save_pending.store(true, atomic::Ordering::Relaxed);
@@ -115,7 +115,7 @@ pub(super) fn register_hooks(handlers: &Handlers) {
 
     let tx = handlers.auto_save.clone();
     register_hook!(move |event: &mut OnModeSwitch<'_, '_>| {
-        if event.old_mode == Mode::Insert {
+        if event.old_mode == Mode::Normal {
             send_blocking(&tx, AutoSaveEvent::LeftInsertMode)
         }
         Ok(())

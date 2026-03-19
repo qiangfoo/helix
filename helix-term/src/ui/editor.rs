@@ -38,15 +38,9 @@ pub struct EditorView {
     pub keymaps: Keymaps,
     on_next_key: Option<(OnKeyCallback, OnKeyCallbackKind)>,
     pseudo_pending: Vec<KeyEvent>,
-    pub(crate) last_insert: (commands::MappableCommand, Vec<InsertEvent>),
     spinners: ProgressSpinners,
     /// Tracks if the terminal window is focused by reaction to terminal focus events
     terminal_focused: bool,
-}
-
-#[derive(Debug, Clone)]
-pub enum InsertEvent {
-    Key(KeyEvent),
 }
 
 impl EditorView {
@@ -55,7 +49,6 @@ impl EditorView {
             keymaps,
             on_next_key: None,
             pseudo_pending: Vec::new(),
-            last_insert: (commands::MappableCommand::normal_mode, Vec::new()),
             spinners: ProgressSpinners::default(),
             terminal_focused: true,
         }
@@ -527,16 +520,14 @@ impl EditorView {
             .unwrap_or(base_cursor_scope);
 
         let cursor_scope = match mode {
-            Mode::Insert => theme.find_highlight_exact("ui.cursor.insert"),
-            Mode::Select => theme.find_highlight_exact("ui.cursor.select"),
             Mode::Normal => theme.find_highlight_exact("ui.cursor.normal"),
+            Mode::Select => theme.find_highlight_exact("ui.cursor.select"),
         }
         .unwrap_or(base_cursor_scope);
 
         let primary_cursor_scope = match mode {
-            Mode::Insert => theme.find_highlight_exact("ui.cursor.primary.insert"),
-            Mode::Select => theme.find_highlight_exact("ui.cursor.primary.select"),
             Mode::Normal => theme.find_highlight_exact("ui.cursor.primary.normal"),
+            Mode::Select => theme.find_highlight_exact("ui.cursor.primary.select"),
         }
         .unwrap_or(base_primary_cursor_scope);
 
@@ -568,7 +559,7 @@ impl EditorView {
                 let cursor_start = prev_grapheme_boundary(text, range.head);
                 // non block cursors look like they exclude the cursor
                 let selection_end =
-                    if selection_is_primary && !cursor_is_block && mode != Mode::Insert {
+                    if selection_is_primary && !cursor_is_block && mode != Mode::Normal {
                         range.head
                     } else {
                         cursor_start
@@ -590,7 +581,7 @@ impl EditorView {
                 // non block cursors look like they exclude the cursor
                 let selection_start = if selection_is_primary
                     && !cursor_is_block
-                    && !(mode == Mode::Insert && cursor_end == range.anchor)
+                    && !(mode == Mode::Normal && cursor_end == range.anchor)
                 {
                     range.head
                 } else {
@@ -912,14 +903,6 @@ impl EditorView {
                     cx: cxt,
                 });
 
-                // HAXX: if we just entered insert mode from normal, clear key buf
-                // and record the command that got us into this mode.
-                if current_mode == Mode::Insert {
-                    // how we entered insert mode is important, and we should track that so
-                    // we can repeat the side effect.
-                    self.last_insert.0 = command.clone();
-                    self.last_insert.1.clear();
-                }
             }
 
             last_mode = current_mode;
@@ -940,35 +923,6 @@ impl EditorView {
         None
     }
 
-    fn insert_mode(&mut self, cx: &mut commands::Context, event: KeyEvent) {
-        if let Some(keyresult) = self.handle_keymap_event(Mode::Insert, cx, event) {
-            match keyresult {
-                KeymapResult::NotFound => {
-                    if !self.on_next_key(OnKeyCallbackKind::Fallback, cx, event) {
-                        if let Some(ch) = event.char() {
-                            commands::insert::insert_char(cx, ch)
-                        }
-                    }
-                }
-                KeymapResult::Cancelled(pending) => {
-                    for ev in pending {
-                        match ev.char() {
-                            Some(ch) => commands::insert::insert_char(cx, ch),
-                            None => {
-                                if let KeymapResult::Matched(command) =
-                                    self.keymaps.get(Mode::Insert, ev)
-                                {
-                                    command.execute(cx);
-                                }
-                            }
-                        }
-                    }
-                }
-                _ => unreachable!(),
-            }
-        }
-    }
-
     fn command_mode(&mut self, mode: Mode, cxt: &mut commands::Context, event: KeyEvent) {
         match (event, cxt.editor.count) {
             // If the count is already started and the input is a number, always continue the count.
@@ -984,20 +938,6 @@ impl EditorView {
             (key!(i @ '1'..='9'), None) if !self.keymaps.contains_key(mode, event) => {
                 let i = i.to_digit(10).unwrap() as usize;
                 cxt.editor.count = NonZeroUsize::new(i);
-            }
-            // special handling for repeat operator
-            (key!('.'), _) if self.keymaps.pending().is_empty() => {
-                for _ in 0..cxt.editor.count.map_or(1, NonZeroUsize::into) {
-                    // first execute whatever put us into insert mode
-                    self.last_insert.0.execute(cxt);
-                    // then replay the inputs
-                    for key in self.last_insert.1.clone() {
-                        match key {
-                            InsertEvent::Key(key) => self.insert_mode(cxt, key),
-                        }
-                    }
-                }
-                cxt.editor.count = None;
             }
             _ => {
                 // set the count
@@ -1290,7 +1230,7 @@ impl Component for EditorView {
 
                 // Store a history state if not in insert mode. Otherwise wait till we exit insert
                 // to include any edits to the paste in the history state.
-                if mode != Mode::Insert {
+                if mode != Mode::Normal {
                     doc.append_changes_to_history(view);
                 }
 
@@ -1311,13 +1251,7 @@ impl Component for EditorView {
                 let mode = cx.editor.mode();
 
                 if !self.on_next_key(OnKeyCallbackKind::PseudoPending, &mut cx, key) {
-                    match mode {
-                        Mode::Insert => {
-                            self.insert_mode(&mut cx, key);
-                            self.last_insert.1.push(InsertEvent::Key(key));
-                        }
-                        mode => self.command_mode(mode, &mut cx, key),
-                    }
+                    self.command_mode(mode, &mut cx, key);
                 }
 
                 self.on_next_key = cx.on_next_key_callback.take();
@@ -1343,7 +1277,7 @@ impl Component for EditorView {
 
                 // Store a history state if not in insert mode. This also takes care of
                 // committing changes when leaving insert mode.
-                if mode != Mode::Insert {
+                if mode != Mode::Normal {
                     doc.append_changes_to_history(view);
                 }
                 let callback = if callbacks.is_empty() {
