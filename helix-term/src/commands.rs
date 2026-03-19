@@ -514,7 +514,6 @@ impl MappableCommand {
         align_selections, "Align selections in column",
         keep_primary_selection, "Keep primary selection",
         remove_primary_selection, "Remove primary selection",
-        completion, "Invoke completion popup",
         hover, "Show docs for item under cursor",
         toggle_comments, "Comment/uncomment selections",
         toggle_line_comments, "Line comment/uncomment selections",
@@ -5339,17 +5338,6 @@ fn remove_primary_selection(cx: &mut Context) {
     let selection = selection.clone().remove(index);
 
     doc.set_selection(view.id, selection);
-}
-
-pub fn completion(cx: &mut Context) {
-    let (view, doc) = current!(cx.editor);
-    let range = doc.selection(view.id).primary();
-    let text = doc.text().slice(..);
-    let cursor = range.cursor(text);
-
-    cx.editor
-        .handlers
-        .trigger_completions(cursor, doc.id(), view.id);
 }
 
 // comments

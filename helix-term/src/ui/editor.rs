@@ -2,14 +2,13 @@ use crate::{
     commands::{self, OnKeyCallback, OnKeyCallbackKind},
     compositor::{Component, Context, Event, EventResult},
     events::{OnModeSwitch, PostCommand},
-    handlers::completion::CompletionItem,
     key,
     keymap::{KeymapResult, Keymaps},
     ui::{
         document::{render_document, LinePos, TextRenderer},
         statusline,
         text_decorations::{self, Decoration, DecorationManager, InlineDiagnostics},
-        Completion, ProgressSpinners,
+        ProgressSpinners,
     },
 };
 
@@ -20,12 +19,12 @@ use helix_core::{
     syntax::{self, OverlayHighlights},
     text_annotations::TextAnnotations,
     unicode::width::UnicodeWidthStr,
-    visual_offset_from_block, Change, Position, Range, Selection, Transaction,
+    visual_offset_from_block, Position, Range, Selection,
 };
 use helix_view::{
     annotations::diagnostics::DiagnosticFilter,
     document::{Mode, SCRATCH_BUFFER_NAME},
-    editor::{CompleteAction, CursorShapeConfig},
+    editor::CursorShapeConfig,
     graphics::{Color, CursorKind, Modifier, Rect, Style},
     input::{KeyEvent, MouseButton, MouseEvent, MouseEventKind},
     keyboard::{KeyCode, KeyModifiers},
@@ -40,7 +39,6 @@ pub struct EditorView {
     on_next_key: Option<(OnKeyCallback, OnKeyCallbackKind)>,
     pseudo_pending: Vec<KeyEvent>,
     pub(crate) last_insert: (commands::MappableCommand, Vec<InsertEvent>),
-    pub(crate) completion: Option<Completion>,
     spinners: ProgressSpinners,
     /// Tracks if the terminal window is focused by reaction to terminal focus events
     terminal_focused: bool,
@@ -49,12 +47,6 @@ pub struct EditorView {
 #[derive(Debug, Clone)]
 pub enum InsertEvent {
     Key(KeyEvent),
-    CompletionApply {
-        trigger_offset: usize,
-        changes: Vec<Change>,
-    },
-    TriggerCompletion,
-    RequestCompletion,
 }
 
 impl EditorView {
@@ -64,7 +56,6 @@ impl EditorView {
             on_next_key: None,
             pseudo_pending: Vec::new(),
             last_insert: (commands::MappableCommand::normal_mode, Vec::new()),
-            completion: None,
             spinners: ProgressSpinners::default(),
             terminal_focused: true,
         }
@@ -999,44 +990,10 @@ impl EditorView {
                 for _ in 0..cxt.editor.count.map_or(1, NonZeroUsize::into) {
                     // first execute whatever put us into insert mode
                     self.last_insert.0.execute(cxt);
-                    let mut last_savepoint = None;
-                    let mut last_request_savepoint = None;
                     // then replay the inputs
                     for key in self.last_insert.1.clone() {
                         match key {
                             InsertEvent::Key(key) => self.insert_mode(cxt, key),
-                            InsertEvent::CompletionApply {
-                                trigger_offset,
-                                changes,
-                            } => {
-                                let (view, doc) = current!(cxt.editor);
-
-                                if let Some(last_savepoint) = last_savepoint.as_deref() {
-                                    doc.restore(view, last_savepoint, true);
-                                }
-
-                                let text = doc.text().slice(..);
-                                let cursor = doc.selection(view.id).primary().cursor(text);
-
-                                let shift_position = |pos: usize| -> usize {
-                                    (pos + cursor).saturating_sub(trigger_offset)
-                                };
-
-                                let tx = Transaction::change(
-                                    doc.text(),
-                                    changes.iter().cloned().map(|(start, end, t)| {
-                                        (shift_position(start), shift_position(end), t)
-                                    }),
-                                );
-                                doc.apply(&tx, view.id);
-                            }
-                            InsertEvent::TriggerCompletion => {
-                                last_savepoint = take(&mut last_request_savepoint);
-                            }
-                            InsertEvent::RequestCompletion => {
-                                let (view, doc) = current!(cxt.editor);
-                                last_request_savepoint = Some(doc.savepoint(view));
-                            }
                         }
                     }
                 }
@@ -1063,57 +1020,6 @@ impl EditorView {
                 }
             }
         }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn set_completion(
-        &mut self,
-        editor: &mut Editor,
-        items: Vec<CompletionItem>,
-        trigger_offset: usize,
-        size: Rect,
-    ) -> Option<Rect> {
-        let mut completion = Completion::new(editor, items, trigger_offset);
-
-        if completion.is_empty() {
-            // skip if we got no completion results
-            return None;
-        }
-
-        let area = completion.area(size, editor);
-        editor.last_completion = Some(CompleteAction::Triggered);
-        self.last_insert.1.push(InsertEvent::TriggerCompletion);
-
-        // TODO : propagate required size on resize to completion too
-        self.completion = Some(completion);
-        Some(area)
-    }
-
-    pub fn clear_completion(&mut self, editor: &mut Editor) -> Option<OnKeyCallback> {
-        self.completion = None;
-        let mut on_next_key: Option<OnKeyCallback> = None;
-        editor.handlers.completions.request_controller.restart();
-        editor.handlers.completions.active_completions.clear();
-        if let Some(last_completion) = editor.last_completion.take() {
-            match last_completion {
-                CompleteAction::Triggered => (),
-                CompleteAction::Applied {
-                    trigger_offset,
-                    changes,
-                    ..
-                } => {
-                    self.last_insert.1.push(InsertEvent::CompletionApply {
-                        trigger_offset,
-                        changes,
-                    });
-                }
-                CompleteAction::Selected { savepoint } => {
-                    let (view, doc) = current!(editor);
-                    doc.restore(view, &savepoint, false);
-                }
-            }
-        }
-        on_next_key
     }
 
     pub fn handle_idle_timeout(&mut self, cx: &mut commands::Context) -> EventResult {
@@ -1188,7 +1094,6 @@ impl EditorView {
                 if let Some((pos, view_id)) = pos_and_view(editor, row, column, true) {
                     editor.focus(view_id);
 
-                    let prev_view_id = view!(editor).id;
                     let doc = doc_mut!(editor, &view!(editor, view_id).doc);
 
                     if modifiers == KeyModifiers::ALT {
@@ -1205,10 +1110,6 @@ impl EditorView {
                         doc.set_selection(view_id, Selection::single(primary.anchor, primary.head));
                     } else {
                         doc.set_selection(view_id, Selection::point(pos));
-                    }
-
-                    if view_id != prev_view_id {
-                        self.clear_completion(editor);
                     }
 
                     editor.ensure_cursor_in_view(view_id);
@@ -1412,54 +1313,8 @@ impl Component for EditorView {
                 if !self.on_next_key(OnKeyCallbackKind::PseudoPending, &mut cx, key) {
                     match mode {
                         Mode::Insert => {
-                            // let completion swallow the event if necessary
-                            let mut consumed = false;
-                            if let Some(completion) = &mut self.completion {
-                                let res = {
-                                    // use a fake context here
-                                    let mut cx = Context {
-                                        editor: cx.editor,
-                                        jobs: cx.jobs,
-                                        scroll: None,
-                                    };
-
-                                    if let EventResult::Consumed(callback) =
-                                        completion.handle_event(event, &mut cx)
-                                    {
-                                        consumed = true;
-                                        Some(callback)
-                                    } else if let EventResult::Consumed(callback) =
-                                        completion.handle_event(&Event::Key(key!(Enter)), &mut cx)
-                                    {
-                                        Some(callback)
-                                    } else {
-                                        None
-                                    }
-                                };
-
-                                if let Some(callback) = res {
-                                    if callback.is_some() {
-                                        // assume close_fn
-                                        if let Some(cb) = self.clear_completion(cx.editor) {
-                                            if consumed {
-                                                cx.on_next_key_callback =
-                                                    Some((cb, OnKeyCallbackKind::Fallback))
-                                            } else {
-                                                self.on_next_key =
-                                                    Some((cb, OnKeyCallbackKind::Fallback));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // if completion didn't take the event, we pass it onto commands
-                            if !consumed {
-                                self.insert_mode(&mut cx, key);
-
-                                // record last_insert key
-                                self.last_insert.1.push(InsertEvent::Key(key));
-                            }
+                            self.insert_mode(&mut cx, key);
+                            self.last_insert.1.push(InsertEvent::Key(key));
                         }
                         mode => self.command_mode(mode, &mut cx, key),
                     }
@@ -1625,9 +1480,6 @@ impl Component for EditorView {
             }
         }
 
-        if let Some(completion) = self.completion.as_mut() {
-            completion.render(area, surface, cx);
-        }
     }
 
     fn cursor(&self, _area: Rect, editor: &Editor) -> (Option<Position>, CursorKind) {

@@ -18,7 +18,7 @@ use crate::events::{OnModeSwitch, PostInsertChar};
 use crate::handlers::Handlers;
 use crate::ui::lsp::signature_help::{Signature, SignatureHelp};
 use crate::ui::Popup;
-use crate::{job, ui};
+use crate::job;
 
 #[derive(Debug, PartialEq, Eq)]
 enum State {
@@ -266,24 +266,10 @@ pub fn show_signature_help(
         signatures,
     );
 
-    let mut popup = Popup::new(SignatureHelp::ID, contents)
+    let popup = Popup::new(SignatureHelp::ID, contents)
         .position(old_popup.and_then(|p| p.get_position()))
         .position_bias(Open::Above)
         .ignore_escape_key(true);
-
-    // Don't create a popup if it intersects the auto-complete menu.
-    let size = compositor.size();
-    if compositor
-        .find::<ui::EditorView>()
-        .unwrap()
-        .completion
-        .as_mut()
-        .map(|completion| completion.area(size, editor))
-        .filter(|area| area.intersects(popup.area(size, editor)))
-        .is_some()
-    {
-        return;
-    }
 
     compositor.replace_or_push(SignatureHelp::ID, popup);
 }

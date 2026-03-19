@@ -1217,7 +1217,6 @@ pub struct Editor {
     pub idle_timer: Pin<Box<Sleep>>,
     redraw_timer: Pin<Box<Sleep>>,
     last_motion: Option<Motion>,
-    pub last_completion: Option<CompleteAction>,
     pub last_cwd: Option<PathBuf>,
     pub dir_stack: VecDeque<PathBuf>,
 
@@ -1264,21 +1263,6 @@ pub enum ConfigEvent {
 enum ThemeAction {
     Set,
     Preview,
-}
-
-#[derive(Debug, Clone)]
-pub enum CompleteAction {
-    Triggered,
-    /// A savepoint of the currently selected completion. The savepoint
-    /// MUST be restored before sending any event to the LSP
-    Selected {
-        savepoint: Arc<SavePoint>,
-    },
-    Applied {
-        trigger_offset: usize,
-        changes: Vec<Change>,
-        placeholder: bool,
-    },
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -1350,7 +1334,6 @@ impl Editor {
             idle_timer: Box::pin(sleep(conf.idle_timeout)),
             redraw_timer: Box::pin(sleep(Duration::MAX)),
             last_motion: None,
-            last_completion: None,
             last_cwd: None,
             config,
             auto_pairs,

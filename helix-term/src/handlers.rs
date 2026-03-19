@@ -16,7 +16,6 @@ use self::document_colors::DocumentColorsHandler;
 use self::document_links::DocumentLinksHandler;
 
 mod auto_save;
-pub mod completion;
 pub mod diagnostics;
 mod document_colors;
 mod document_highlight;
@@ -24,10 +23,9 @@ mod document_links;
 mod file_watcher;
 mod prompt;
 mod signature_help;
-pub fn setup(config: Arc<ArcSwap<Config>>) -> Handlers {
+pub fn setup(_config: Arc<ArcSwap<Config>>) -> Handlers {
     events::register();
 
-    let event_tx = completion::CompletionHandler::new(config).spawn();
     let signature_hints = SignatureHelpHandler::new().spawn();
     let auto_save = AutoSaveHandler::new().spawn();
     let document_colors = DocumentColorsHandler::default().spawn();
@@ -38,7 +36,6 @@ pub fn setup(config: Arc<ArcSwap<Config>>) -> Handlers {
     let file_watcher = file_watcher::spawn();
 
     let handlers = Handlers {
-        completions: helix_view::handlers::completion::CompletionHandler::new(event_tx),
         signature_hints,
         auto_save,
         document_colors,
@@ -50,7 +47,6 @@ pub fn setup(config: Arc<ArcSwap<Config>>) -> Handlers {
     };
 
     helix_view::handlers::register_hooks(&handlers);
-    completion::register_hooks(&handlers);
     signature_help::register_hooks(&handlers);
     document_highlight::register_hooks(&handlers);
     auto_save::register_hooks(&handlers);

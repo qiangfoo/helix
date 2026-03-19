@@ -1,11 +1,10 @@
 use std::path::PathBuf;
 
-use completion::{CompletionEvent, CompletionHandler};
 use helix_event::send_blocking;
 use tokio::sync::mpsc::Sender;
 
 use crate::handlers::lsp::SignatureHelpInvoked;
-use crate::{DocumentId, Editor, ViewId};
+use crate::Editor;
 
 #[derive(Debug)]
 pub enum FileWatcherCommand {
@@ -13,7 +12,6 @@ pub enum FileWatcherCommand {
     Unwatch { path: PathBuf },
 }
 
-pub mod completion;
 pub mod diagnostics;
 pub mod lsp;
 pub mod word_index;
@@ -25,8 +23,6 @@ pub enum AutoSaveEvent {
 }
 
 pub struct Handlers {
-    // only public because most of the actual implementation is in helix-term right now :/
-    pub completions: CompletionHandler,
     pub signature_hints: Sender<lsp::SignatureHelpEvent>,
     pub auto_save: Sender<AutoSaveEvent>,
     pub document_colors: Sender<lsp::DocumentColorsEvent>,
@@ -38,15 +34,6 @@ pub struct Handlers {
 }
 
 impl Handlers {
-    /// Manually trigger completion (c-x)
-    pub fn trigger_completions(&self, trigger_pos: usize, doc: DocumentId, view: ViewId) {
-        self.completions.event(CompletionEvent::ManualTrigger {
-            cursor: trigger_pos,
-            doc,
-            view,
-        });
-    }
-
     pub fn trigger_signature_help(&self, invocation: SignatureHelpInvoked, editor: &Editor) {
         let event = match invocation {
             SignatureHelpInvoked::Automatic => {

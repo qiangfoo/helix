@@ -5,7 +5,6 @@ pub mod case_conversion;
 pub mod chars;
 pub mod command_line;
 pub mod comment;
-pub mod completion;
 pub mod config;
 pub mod diagnostic;
 pub mod diff;
@@ -65,7 +64,6 @@ pub use selection::{Range, Selection};
 pub use smallvec::{smallvec, SmallVec};
 pub use syntax::Syntax;
 
-pub use completion::CompletionItem;
 pub use diagnostic::Diagnostic;
 
 pub use line_ending::{LineEnding, NATIVE_LINE_ENDING};
