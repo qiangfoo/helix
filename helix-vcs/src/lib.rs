@@ -43,15 +43,18 @@ impl DiffProviderRegistry {
             })
     }
 
-    /// Get the current name of the current [HEAD](https://stackoverflow.com/questions/2304087/what-is-head-in-git).
-    pub fn get_current_head_name(&self, file: &Path) -> Option<Arc<ArcSwap<Box<str>>>> {
+    /// Get the current HEAD name and worktree name in a single repo open.
+    pub fn get_repo_info(
+        &self,
+        file: &Path,
+    ) -> Option<(Arc<ArcSwap<Box<str>>>, Option<String>)> {
         self.providers
             .iter()
-            .find_map(|provider| match provider.get_current_head_name(file) {
+            .find_map(|provider| match provider.get_repo_info(file) {
                 Ok(res) => Some(res),
                 Err(err) => {
                     log::debug!("{err:#?}");
-                    log::debug!("failed to obtain current head name for {}", file.display());
+                    log::debug!("failed to obtain repo info for {}", file.display());
                     None
                 }
             })
@@ -110,10 +113,10 @@ impl DiffProvider {
         }
     }
 
-    fn get_current_head_name(&self, file: &Path) -> Result<Arc<ArcSwap<Box<str>>>> {
+    fn get_repo_info(&self, file: &Path) -> Result<(Arc<ArcSwap<Box<str>>>, Option<String>)> {
         match self {
             #[cfg(feature = "git")]
-            Self::Git => git::get_current_head_name(file),
+            Self::Git => git::get_repo_info(file),
             Self::None => bail!("No diff support compiled in"),
         }
     }

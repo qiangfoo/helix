@@ -201,6 +201,7 @@ pub struct Document {
 
     diff_handle: Option<DiffHandle>,
     version_control_head: Option<Arc<ArcSwap<Box<str>>>>,
+    worktree_name: Option<String>,
 
     // when document was used for most-recent-used buffer picker
     pub focused_at: std::time::Instant,
@@ -748,6 +749,7 @@ impl Document {
             diff_handle: None,
             config,
             version_control_head: None,
+            worktree_name: None,
             focused_at: std::time::Instant::now(),
             readonly: true,
             jump_labels: HashMap::new(),
@@ -1279,7 +1281,13 @@ impl Document {
             None => self.diff_handle = None,
         }
 
-        self.version_control_head = provider_registry.get_current_head_name(&path);
+        if let Some((head, worktree)) = provider_registry.get_repo_info(&path) {
+            self.version_control_head = Some(head);
+            self.worktree_name = worktree;
+        } else {
+            self.version_control_head = None;
+            self.worktree_name = None;
+        }
 
         Ok(())
     }
@@ -1947,6 +1955,14 @@ impl Document {
         version_control_head: Option<Arc<ArcSwap<Box<str>>>>,
     ) {
         self.version_control_head = version_control_head;
+    }
+
+    pub fn worktree_name(&self) -> Option<&str> {
+        self.worktree_name.as_deref()
+    }
+
+    pub fn set_worktree_name(&mut self, name: Option<String>) {
+        self.worktree_name = name;
     }
 
     #[inline]

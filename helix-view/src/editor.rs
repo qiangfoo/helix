@@ -613,8 +613,8 @@ impl Default for StatusLineConfig {
             left: vec![
                 E::Mode,
                 E::Spinner,
+                E::GitWorktree,
                 E::FileName,
-                E::ReadOnlyIndicator,
                 E::FileModificationIndicator,
             ],
             center: vec![],
@@ -716,6 +716,9 @@ pub enum StatusLineElement {
 
     /// Current version control information
     VersionControl,
+
+    /// The git worktree name (repo root directory name)
+    GitWorktree,
 
     /// Indicator for selected register
     Register,
@@ -1915,7 +1918,10 @@ impl Editor {
             if let Some(diff_base) = self.diff_providers.get_diff_base(&path) {
                 doc.set_diff_base(diff_base);
             }
-            doc.set_version_control_head(self.diff_providers.get_current_head_name(&path));
+            if let Some((head, worktree)) = self.diff_providers.get_repo_info(&path) {
+                doc.set_version_control_head(Some(head));
+                doc.set_worktree_name(worktree);
+            }
 
             let id = self.new_document(doc);
             self.launch_language_servers(id);

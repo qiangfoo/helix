@@ -157,6 +157,7 @@ where
         helix_view::editor::StatusLineElement::VersionControl => render_version_control,
         helix_view::editor::StatusLineElement::Register => render_register,
         helix_view::editor::StatusLineElement::CurrentWorkingDirectory => render_cwd,
+        helix_view::editor::StatusLineElement::GitWorktree => render_git_worktree,
     }
 }
 
@@ -582,4 +583,16 @@ where
         .to_string_lossy()
         .to_string();
     write(context, cwd.into())
+}
+
+fn render_git_worktree<'a, F>(context: &mut RenderContext<'a>, write: F)
+where
+    F: Fn(&mut RenderContext<'a>, Span<'a>) + Copy,
+{
+    if let Some(name) = context.doc.worktree_name() {
+        write(context, format!(" {} ", name).into());
+        let sep = &context.editor.config().statusline.separator;
+        let style = context.editor.theme.get("ui.statusline.separator");
+        write(context, Span::styled(sep.to_string(), style));
+    }
 }

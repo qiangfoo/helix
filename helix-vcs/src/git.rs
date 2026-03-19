@@ -59,7 +59,7 @@ pub fn get_diff_base(file: &Path) -> Result<Vec<u8>> {
     }
 }
 
-pub fn get_current_head_name(file: &Path) -> Result<Arc<ArcSwap<Box<str>>>> {
+pub fn get_repo_info(file: &Path) -> Result<(Arc<ArcSwap<Box<str>>>, Option<String>)> {
     debug_assert!(!file.exists() || file.is_file());
     debug_assert!(file.is_absolute());
     let file = gix::path::realpath(file).context("resolve symlinks")?;
@@ -68,15 +68,23 @@ pub fn get_current_head_name(file: &Path) -> Result<Arc<ArcSwap<Box<str>>>> {
     let repo = open_repo(repo_dir)
         .context("failed to open git repo")?
         .to_thread_local();
+
     let head_ref = repo.head_ref()?;
     let head_commit = repo.head_commit()?;
-
-    let name = match head_ref {
+    let head_name = match head_ref {
         Some(reference) => reference.name().shorten().to_string(),
         None => head_commit.id.to_hex_with_len(8).to_string(),
     };
 
-    Ok(Arc::new(ArcSwap::from_pointee(name.into_boxed_str())))
+    let worktree_name = repo.workdir().and_then(|w| {
+        w.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+    });
+
+    Ok((
+        Arc::new(ArcSwap::from_pointee(head_name.into_boxed_str())),
+        worktree_name,
+    ))
 }
 
 pub fn for_each_changed_file(cwd: &Path, f: impl Fn(Result<FileChange>) -> bool) -> Result<()> {
