@@ -674,12 +674,6 @@ impl Application {
                 // limit render calls for fast language server messages
                 helix_event::request_redraw();
             }
-            EditorEvent::DebuggerEvent((id, payload)) => {
-                let needs_render = self.editor.handle_debugger_message(id, payload).await;
-                if needs_render {
-                    self.render().await;
-                }
-            }
             EditorEvent::Redraw => {
                 self.render().await;
             }

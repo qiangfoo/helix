@@ -46,7 +46,6 @@ helix-core = { path = "../helix-core" }
 helix-event = { path = "../helix-event" }
 helix-view = { path = "../helix-view" }
 helix-lsp = { path = "../helix-lsp" }
-helix-dap = { path = "../helix-dap" }
 helix-vcs = { path = "../helix-vcs" }
 helix-loader = { path = "../helix-loader" }
 

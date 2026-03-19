@@ -6,7 +6,6 @@ use crate::handlers::lsp::SignatureHelpInvoked;
 use crate::{DocumentId, Editor, ViewId};
 
 pub mod completion;
-pub mod dap;
 pub mod diagnostics;
 pub mod lsp;
 pub mod word_index;

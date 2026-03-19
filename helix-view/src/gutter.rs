@@ -4,7 +4,7 @@ use helix_core::syntax::config::LanguageServerFeature;
 
 use crate::{
     editor::GutterType,
-    graphics::{Style, UnderlineStyle},
+    graphics::Style,
     Document, Editor, Theme, View,
 };
 
@@ -227,85 +227,6 @@ pub fn padding<'doc>(
     Box::new(|_line: usize, _selected: bool, _first_visual_line: bool, _out: &mut String| None)
 }
 
-pub fn breakpoints<'doc>(
-    editor: &'doc Editor,
-    doc: &'doc Document,
-    _view: &View,
-    theme: &Theme,
-    _is_focused: bool,
-) -> GutterFn<'doc> {
-    let error = theme.get("error");
-    let info = theme.get("info");
-    let breakpoint_style = theme.get("ui.debug.breakpoint");
-
-    let breakpoints = doc.path().and_then(|path| editor.breakpoints.get(path));
-
-    let breakpoints = match breakpoints {
-        Some(breakpoints) => breakpoints,
-        None => return Box::new(move |_, _, _, _| None),
-    };
-
-    Box::new(
-        move |line: usize, _selected: bool, first_visual_line: bool, out: &mut String| {
-            if !first_visual_line {
-                return None;
-            }
-            let breakpoint = breakpoints
-                .iter()
-                .find(|breakpoint| breakpoint.line == line)?;
-
-            let style = if breakpoint.condition.is_some() && breakpoint.log_message.is_some() {
-                error.underline_style(UnderlineStyle::Line)
-            } else if breakpoint.condition.is_some() {
-                error
-            } else if breakpoint.log_message.is_some() {
-                info
-            } else {
-                breakpoint_style
-            };
-
-            let sym = if breakpoint.verified { "●" } else { "◯" };
-            write!(out, "{}", sym).unwrap();
-            Some(style)
-        },
-    )
-}
-
-fn execution_pause_indicator<'doc>(
-    editor: &'doc Editor,
-    doc: &'doc Document,
-    theme: &Theme,
-    is_focused: bool,
-) -> GutterFn<'doc> {
-    let style = theme.get("ui.debug.active");
-    let current_stack_frame = editor.current_stack_frame();
-    let frame_line = current_stack_frame.map(|frame| frame.line.saturating_sub(1));
-    let frame_source_path = current_stack_frame.map(|frame| {
-        frame
-            .source
-            .as_ref()
-            .and_then(|source| source.path.as_ref())
-    });
-    let should_display_for_current_doc =
-        doc.path().is_some() && frame_source_path.unwrap_or(None) == doc.path();
-
-    Box::new(
-        move |line: usize, _selected: bool, first_visual_line: bool, out: &mut String| {
-            if !first_visual_line
-                || !is_focused
-                || line != frame_line?
-                || !should_display_for_current_doc
-            {
-                return None;
-            }
-
-            let sym = "▶";
-            write!(out, "{}", sym).unwrap();
-            Some(style)
-        },
-    )
-}
-
 pub fn diagnostics_or_breakpoints<'doc>(
     editor: &'doc Editor,
     doc: &'doc Document,
@@ -313,15 +234,7 @@ pub fn diagnostics_or_breakpoints<'doc>(
     theme: &Theme,
     is_focused: bool,
 ) -> GutterFn<'doc> {
-    let mut diagnostics = diagnostic(editor, doc, view, theme, is_focused);
-    let mut breakpoints = breakpoints(editor, doc, view, theme, is_focused);
-    let mut execution_pause_indicator = execution_pause_indicator(editor, doc, theme, is_focused);
-
-    Box::new(move |line, selected, first_visual_line: bool, out| {
-        execution_pause_indicator(line, selected, first_visual_line, out)
-            .or_else(|| breakpoints(line, selected, first_visual_line, out))
-            .or_else(|| diagnostics(line, selected, first_visual_line, out))
-    })
+    diagnostic(editor, doc, view, theme, is_focused)
 }
 
 #[cfg(test)]

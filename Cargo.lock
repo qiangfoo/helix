@@ -1409,35 +1409,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "helix-dap"
-version = "25.7.1"
-dependencies = [
- "anyhow",
- "fern",
- "futures-executor",
- "futures-util",
- "helix-core",
- "helix-dap-types",
- "helix-stdx",
- "log",
- "serde",
- "serde_json",
- "slotmap",
- "sonic-rs",
- "thiserror",
- "tokio",
- "tokio-stream",
-]
-
-[[package]]
-name = "helix-dap-types"
-version = "25.7.1"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "helix-event"
 version = "25.7.1"
 dependencies = [
@@ -1540,7 +1511,6 @@ dependencies = [
  "grep-regex",
  "grep-searcher",
  "helix-core",
- "helix-dap",
  "helix-event",
  "helix-loader",
  "helix-lsp",
@@ -1617,7 +1587,6 @@ dependencies = [
  "crossterm",
  "futures-util",
  "helix-core",
- "helix-dap",
  "helix-event",
  "helix-loader",
  "helix-lsp",
@@ -3573,17 +3542,6 @@ name = "writeable"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e9df38ee2d2c3c5948ea468a8406ff0db0b29ae1ffde1bcf20ef305bcc95c51"
-
-[[package]]
-name = "xtask"
-version = "25.7.1"
-dependencies = [
- "helix-core",
- "helix-loader",
- "helix-term",
- "helix-view",
- "toml",
-]
 
 [[package]]
 name = "yoke"

@@ -749,7 +749,7 @@ impl Document {
             config,
             version_control_head: None,
             focused_at: std::time::Instant::now(),
-            readonly: false,
+            readonly: true,
             jump_labels: HashMap::new(),
             document_highlights: HashMap::new(),
             color_swatches: None,
@@ -1238,13 +1238,9 @@ impl Document {
         };
     }
 
-    // Detect if the file is readonly and change the readonly field if necessary (unix only)
+    // All documents are read-only in this viewer build
     pub fn detect_readonly(&mut self) {
-        // Allows setting the flag for files the user cannot modify, like root files
-        self.readonly = match &self.path {
-            None => false,
-            Some(p) => readonly(p),
-        };
+        self.readonly = true;
     }
 
     /// Reload the document from its path.

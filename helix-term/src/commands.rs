@@ -1,9 +1,7 @@
-pub(crate) mod dap;
 pub(crate) mod lsp;
 pub(crate) mod syntax;
 pub(crate) mod typed;
 
-pub use dap::*;
 use futures_util::FutureExt;
 use helix_event::status;
 use helix_stdx::{
@@ -494,6 +492,7 @@ impl MappableCommand {
         yank_joined, "Join and yank selections",
         yank_joined_to_clipboard, "Join and yank selections to clipboard",
         yank_main_selection_to_clipboard, "Yank main selection to clipboard",
+        yank_location_to_clipboard, "Yank file path and line range to clipboard",
         yank_joined_to_primary_clipboard, "Join and yank selections to primary clipboard",
         yank_main_selection_to_primary_clipboard, "Yank main selection to primary clipboard",
         replace_with_yanked, "Replace with yanked text",
@@ -582,22 +581,6 @@ impl MappableCommand {
         goto_prev_entry, "Goto previous pairing",
         goto_next_paragraph, "Goto next paragraph",
         goto_prev_paragraph, "Goto previous paragraph",
-        dap_launch, "Launch debug target",
-        dap_restart, "Restart debugging session",
-        dap_toggle_breakpoint, "Toggle breakpoint",
-        dap_continue, "Continue program execution",
-        dap_pause, "Pause program execution",
-        dap_step_in, "Step in",
-        dap_step_out, "Step out",
-        dap_next, "Step to next",
-        dap_variables, "List variables",
-        dap_terminate, "End debug session",
-        dap_edit_condition, "Edit breakpoint condition on current line",
-        dap_edit_log, "Edit breakpoint log message on current line",
-        dap_switch_thread, "Switch current thread",
-        dap_switch_stack_frame, "Switch stack frame",
-        dap_enable_exceptions, "Enable exception breakpoints",
-        dap_disable_exceptions, "Disable exception breakpoints",
         shell_pipe, "Pipe selections through shell command",
         shell_pipe_to, "Pipe selections into shell command ignoring output",
         shell_insert_output, "Insert shell command output before selections",
@@ -3046,7 +3029,7 @@ fn ensure_selections_forward(cx: &mut Context) {
 }
 
 fn enter_insert_mode(cx: &mut Context) {
-    cx.editor.mode = Mode::Insert;
+    cx.editor.set_error("read-only mode");
 }
 
 // inserts at the start of each selection
@@ -4658,11 +4641,7 @@ fn commit_undo_checkpoint(cx: &mut Context) {
 // Yank / Paste
 
 fn yank(cx: &mut Context) {
-    yank_impl(
-        cx.editor,
-        cx.register
-            .unwrap_or(cx.editor.config().default_yank_register),
-    );
+    yank_impl(cx.editor, '+');
     exit_select_mode(cx);
 }
 
@@ -4723,12 +4702,7 @@ fn yank_joined_impl(editor: &mut Editor, separator: &str, register: char) {
 
 fn yank_joined(cx: &mut Context) {
     let separator = doc!(cx.editor).line_ending.as_str();
-    yank_joined_impl(
-        cx.editor,
-        separator,
-        cx.register
-            .unwrap_or(cx.editor.config().default_yank_register),
-    );
+    yank_joined_impl(cx.editor, separator, '+');
     exit_select_mode(cx);
 }
 
@@ -4763,6 +4737,34 @@ fn yank_main_selection_to_clipboard(cx: &mut Context) {
 
 fn yank_main_selection_to_primary_clipboard(cx: &mut Context) {
     yank_main_selection_to_register(cx.editor, '*');
+    exit_select_mode(cx);
+}
+
+fn yank_location_to_clipboard(cx: &mut Context) {
+    let (view, doc) = current!(cx.editor);
+    let text = doc.text().slice(..);
+
+    let path = match doc.relative_path() {
+        Some(path) => path.to_string_lossy().to_string(),
+        None => {
+            cx.editor.set_error("buffer has no file path");
+            return;
+        }
+    };
+
+    let primary = doc.selection(view.id).primary();
+    let (start_line, end_line) = primary.line_range(text);
+    // Convert from 0-based to 1-based line numbers
+    let location = if start_line == end_line {
+        format!("@{} line {}", path, start_line + 1)
+    } else {
+        format!("@{} line {}-{}", path, start_line + 1, end_line + 1)
+    };
+
+    match cx.editor.registers.write('+', vec![location.clone()]) {
+        Ok(_) => cx.editor.set_status(format!("yanked: {location}")),
+        Err(err) => cx.editor.set_error(err.to_string()),
+    }
     exit_select_mode(cx);
 }
 

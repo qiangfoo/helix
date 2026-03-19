@@ -376,50 +376,11 @@ fn buffer_previous(
 }
 
 fn write_impl(
-    cx: &mut compositor::Context,
-    path: Option<&str>,
-    options: WriteOptions,
+    _cx: &mut compositor::Context,
+    _path: Option<&str>,
+    _options: WriteOptions,
 ) -> anyhow::Result<()> {
-    let config = cx.editor.config();
-    let jobs = &mut cx.jobs;
-    let (view, doc) = current!(cx.editor);
-
-    if doc.trim_trailing_whitespace() {
-        trim_trailing_whitespace(doc, view.id);
-    }
-    if config.trim_final_newlines {
-        trim_final_newlines(doc, view.id);
-    }
-    if doc.insert_final_newline() {
-        insert_final_newline(doc, view.id);
-    }
-
-    // Save an undo checkpoint for any outstanding changes.
-    doc.append_changes_to_history(view);
-
-    let (view, doc) = current_ref!(cx.editor);
-    let fmt = if config.auto_format && options.auto_format {
-        doc.auto_format(cx.editor).map(|fmt| {
-            let callback = make_format_callback(
-                doc.id(),
-                doc.version(),
-                view.id,
-                fmt,
-                Some((path.map(Into::into), options.force)),
-            );
-
-            jobs.add(Job::with_callback(callback).wait_before_exiting());
-        })
-    } else {
-        None
-    };
-
-    if fmt.is_none() {
-        let id = doc.id();
-        cx.editor.save(id, path, options.force)?;
-    }
-
-    Ok(())
+    bail!("read-only mode: writing is disabled");
 }
 
 /// Trim all whitespace preceding line-endings in a document.
@@ -2020,62 +1981,6 @@ fn hsplit_new(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> 
     Ok(())
 }
 
-fn debug_eval(cx: &mut compositor::Context, args: Args, event: PromptEvent) -> anyhow::Result<()> {
-    if event != PromptEvent::Validate {
-        return Ok(());
-    }
-
-    if let Some(debugger) = cx.editor.debug_adapters.get_active_client() {
-        let (frame, thread_id) = match (debugger.active_frame, debugger.thread_id) {
-            (Some(frame), Some(thread_id)) => (frame, thread_id),
-            _ => {
-                bail!("Cannot find current stack frame to access variables")
-            }
-        };
-
-        // TODO: support no frame_id
-
-        let frame_id = debugger.stack_frames[&thread_id][frame].id;
-        let response = helix_lsp::block_on(debugger.eval(args.join(" "), Some(frame_id)))?;
-        cx.editor.set_status(response.result);
-    }
-    Ok(())
-}
-
-fn debug_start(cx: &mut compositor::Context, args: Args, event: PromptEvent) -> anyhow::Result<()> {
-    if event != PromptEvent::Validate {
-        return Ok(());
-    }
-
-    let mut args: Vec<_> = args.into_iter().collect();
-    let name = match args.len() {
-        0 => None,
-        _ => Some(args.remove(0)),
-    };
-    dap_start_impl(cx, name.as_deref(), None, Some(args))
-}
-
-fn debug_remote(
-    cx: &mut compositor::Context,
-    args: Args,
-    event: PromptEvent,
-) -> anyhow::Result<()> {
-    if event != PromptEvent::Validate {
-        return Ok(());
-    }
-
-    let mut args: Vec<_> = args.into_iter().collect();
-    let address = match args.len() {
-        0 => None,
-        _ => Some(args.remove(0).parse()?),
-    };
-    let name = match args.len() {
-        0 => None,
-        _ => Some(args.remove(0)),
-    };
-    dap_start_impl(cx, name.as_deref(), address, Some(args))
-}
-
 fn tutor(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> anyhow::Result<()> {
     if event != PromptEvent::Validate {
         return Ok(());
@@ -3586,39 +3491,6 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         completer: CommandCompleter::none(),
         signature: Signature {
             positionals: (0, Some(0)),
-            ..Signature::DEFAULT
-        },
-    },
-    TypableCommand {
-        name: "debug-start",
-        aliases: &["dbg"],
-        doc: "Start a debug session from a given template with given parameters.",
-        fun: debug_start,
-        completer: CommandCompleter::none(),
-        signature: Signature {
-            positionals: (0, None),
-            ..Signature::DEFAULT
-        },
-    },
-    TypableCommand {
-        name: "debug-remote",
-        aliases: &["dbg-tcp"],
-        doc: "Connect to a debug adapter by TCP address and start a debugging session from a given template with given parameters.",
-        fun: debug_remote,
-        completer: CommandCompleter::none(),
-        signature: Signature {
-            positionals: (0, None),
-            ..Signature::DEFAULT
-        },
-    },
-    TypableCommand {
-        name: "debug-eval",
-        aliases: &[],
-        doc: "Evaluate expression in current debug context.",
-        fun: debug_eval,
-        completer: CommandCompleter::none(),
-        signature: Signature {
-            positionals: (1, Some(1)),
             ..Signature::DEFAULT
         },
     },
