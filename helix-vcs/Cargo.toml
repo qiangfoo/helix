@@ -22,6 +22,8 @@ imara-diff =  "0.2.0"
 anyhow = "1"
 
 log = "0.4"
+
+[dev-dependencies]
 tempfile.workspace = true
 
 [features]
