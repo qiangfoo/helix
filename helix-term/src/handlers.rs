@@ -24,8 +24,6 @@ mod document_links;
 mod file_watcher;
 mod prompt;
 mod signature_help;
-mod snippet;
-
 pub fn setup(config: Arc<ArcSwap<Config>>) -> Handlers {
     events::register();
 
@@ -57,7 +55,6 @@ pub fn setup(config: Arc<ArcSwap<Config>>) -> Handlers {
     document_highlight::register_hooks(&handlers);
     auto_save::register_hooks(&handlers);
     diagnostics::register_hooks(&handlers);
-    snippet::register_hooks(&handlers);
     document_colors::register_hooks(&handlers);
     document_links::register_hooks(&handlers);
     file_watcher::register_hooks(&handlers);

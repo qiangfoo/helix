@@ -80,7 +80,6 @@ pub enum OffsetEncoding {
 pub mod util {
     use super::*;
     use helix_core::line_ending::{line_end_byte_index, line_end_char_index};
-    use helix_core::snippets::{RenderedSnippet, Snippet, SnippetRenderCtx};
     use helix_core::{chars, RopeSlice};
     use helix_core::{diagnostic::NumberOrString, Range, Rope, Selection, Tendril, Transaction};
 
@@ -371,43 +370,6 @@ pub mod util {
 
     /// Creates a [Transaction] from the [Snippet] in a completion response.
     /// The transaction applies the edit to all cursors.
-    pub fn generate_transaction_from_snippet(
-        doc: &Rope,
-        selection: &Selection,
-        edit_offset: Option<(i128, i128)>,
-        replace_mode: bool,
-        snippet: Snippet,
-        cx: &mut SnippetRenderCtx,
-    ) -> (Transaction, RenderedSnippet) {
-        let text = doc.slice(..);
-        let (removed_start, removed_end) = completion_range(
-            text,
-            edit_offset,
-            replace_mode,
-            selection.primary().cursor(text),
-        )
-        .expect("transaction must be valid for primary selection");
-        let removed_text = text.slice(removed_start..removed_end);
-        let (transaction, mapped_selection, snippet) = snippet.render(
-            doc,
-            selection,
-            |range| {
-                let cursor = range.cursor(text);
-                completion_range(text, edit_offset, replace_mode, cursor)
-                    .filter(|(start, end)| text.slice(start..end) == removed_text)
-                    .unwrap_or_else(|| find_completion_range(text, replace_mode, cursor))
-            },
-            cx,
-        );
-        let transaction = transaction.with_selection(snippet.first_selection(
-            // we keep the direction of the old primary selection in case it changed during mapping
-            // but use the primary idx from the mapped selection in case ranges had to be merged
-            selection.primary().direction(),
-            mapped_selection.primary_index(),
-        ));
-        (transaction, snippet)
-    }
-
     pub fn generate_transaction_from_edits(
         doc: &Rope,
         mut edits: Vec<lsp::TextEdit>,

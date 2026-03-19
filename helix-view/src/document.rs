@@ -9,7 +9,6 @@ use helix_core::command_line::Token;
 use helix_core::diagnostic::DiagnosticProvider;
 use helix_core::doc_formatter::TextFormat;
 use helix_core::encoding::Encoding;
-use helix_core::snippets::{ActiveSnippet, SnippetRenderCtx};
 use helix_core::syntax::config::LanguageServerFeature;
 use helix_core::text_annotations::{InlineAnnotation, Overlay};
 use helix_event::TaskController;
@@ -143,8 +142,6 @@ pub struct Document {
     text: Rope,
     selections: HashMap<ViewId, Selection>,
     view_data: HashMap<ViewId, ViewData>,
-    pub active_snippet: Option<ActiveSnippet>,
-
     /// Inlay hints annotations for the document, by view.
     ///
     /// To know if they're up-to-date, check the `id` field in `DocumentInlayHints`.
@@ -720,7 +717,6 @@ impl Document {
 
         Self {
             id: DocumentId::default(),
-            active_snippet: None,
             path: None,
             relative_path: OnceCell::new(),
             encoding,
@@ -2267,16 +2263,6 @@ impl Document {
                 lang_config.auto_pairs.as_ref()
             })
             .or(global_config)
-    }
-
-    pub fn snippet_ctx(&self) -> SnippetRenderCtx {
-        SnippetRenderCtx {
-            // TODO snippet variable resolution
-            resolve_var: Box::new(|_| None),
-            tab_width: self.tab_width(),
-            indent_style: self.indent_style,
-            line_ending: self.line_ending.as_str(),
-        }
     }
 
     pub fn text_width(&self) -> usize {

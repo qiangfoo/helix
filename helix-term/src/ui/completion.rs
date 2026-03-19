@@ -6,7 +6,6 @@ use crate::{
         trigger_auto_completion, CompletionItem, CompletionResponse, ResolveHandler,
     },
 };
-use helix_core::snippets::{ActiveSnippet, RenderedSnippet, Snippet};
 use helix_core::{self as core, chars, fuzzy::MATCHER, Change, Transaction};
 use helix_lsp::{lsp, util, OffsetEncoding};
 use helix_view::{
@@ -183,7 +182,7 @@ impl Completion {
 
                     match item {
                         CompletionItem::Lsp(item) => {
-                            let (transaction, _) = lsp_item_to_transaction(
+                            let transaction = lsp_item_to_transaction(
                                 doc,
                                 view.id,
                                 &item.item,
@@ -214,7 +213,7 @@ impl Completion {
                     doc.append_changes_to_history(view);
 
                     // item always present here
-                    let (transaction, additional_edits, snippet) = match item.clone() {
+                    let (transaction, additional_edits) = match item.clone() {
                         CompletionItem::Lsp(mut item) => {
                             let language_server = language_server!(item);
 
@@ -229,7 +228,7 @@ impl Completion {
                             };
 
                             let encoding = language_server.offset_encoding();
-                            let (transaction, snippet) = lsp_item_to_transaction(
+                            let transaction = lsp_item_to_transaction(
                                 doc,
                                 view.id,
                                 &item.item,
@@ -242,27 +241,19 @@ impl Completion {
                             (
                                 transaction,
                                 add_edits.map(|edits| (edits, encoding)),
-                                snippet,
                             )
                         }
                         CompletionItem::Other(core::CompletionItem { transaction, .. }) => {
-                            (transaction, None, None)
+                            (transaction, None)
                         }
                     };
 
                     doc.apply(&transaction, view.id);
-                    let placeholder = snippet.is_some();
-                    if let Some(snippet) = snippet {
-                        doc.active_snippet = match doc.active_snippet.take() {
-                            Some(active) => active.insert_subsnippet(snippet),
-                            None => ActiveSnippet::new(snippet),
-                        };
-                    }
 
                     editor.last_completion = Some(CompleteAction::Applied {
                         trigger_offset,
                         changes: completion_changes(&transaction, trigger_offset),
-                        placeholder,
+                        placeholder: false,
                     });
 
                     // TODO: add additional _edits to completion_changes?
@@ -586,7 +577,7 @@ fn lsp_item_to_transaction(
     offset_encoding: OffsetEncoding,
     trigger_offset: usize,
     replace_mode: bool,
-) -> (Transaction, Option<RenderedSnippet>) {
+) -> Transaction {
     let selection = doc.selection(view_id);
     let text = doc.text().slice(..);
     let primary_cursor = selection.primary().cursor(text);
@@ -605,7 +596,7 @@ fn lsp_item_to_transaction(
         };
 
         let Some(range) = util::lsp_range_to_range(doc.text(), edit.range, offset_encoding) else {
-            return (Transaction::new(doc.text()), None);
+            return Transaction::new(doc.text());
         };
 
         let start_offset = range.anchor as i128 - primary_cursor as i128;
@@ -625,35 +616,13 @@ fn lsp_item_to_transaction(
         (None, new_text)
     };
 
-    if matches!(item.kind, Some(lsp::CompletionItemKind::SNIPPET))
-        || matches!(
-            item.insert_text_format,
-            Some(lsp::InsertTextFormat::SNIPPET)
-        )
-    {
-        let Ok(snippet) = Snippet::parse(&new_text) else {
-            log::error!("Failed to parse snippet: {new_text:?}",);
-            return (Transaction::new(doc.text()), None);
-        };
-        let (transaction, snippet) = util::generate_transaction_from_snippet(
-            doc.text(),
-            selection,
-            edit_offset,
-            replace_mode,
-            snippet,
-            &mut doc.snippet_ctx(),
-        );
-        (transaction, Some(snippet))
-    } else {
-        let transaction = util::generate_transaction_from_completion_edit(
-            doc.text(),
-            selection,
-            edit_offset,
-            replace_mode,
-            new_text,
-        );
-        (transaction, None)
-    }
+    util::generate_transaction_from_completion_edit(
+        doc.text(),
+        selection,
+        edit_offset,
+        replace_mode,
+        new_text,
+    )
 }
 
 fn completion_changes(transaction: &Transaction, trigger_offset: usize) -> Vec<Change> {

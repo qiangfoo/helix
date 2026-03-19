@@ -137,9 +137,6 @@ impl EditorView {
                     overlays.push(overlay);
                 }
             }
-            if let Some(tabstops) = Self::tabstop_highlights(doc, theme) {
-                overlays.push(tabstops);
-            }
             overlays.push(Self::doc_selection_highlights(
                 editor.mode(),
                 doc,
@@ -630,16 +627,6 @@ impl EditorView {
         Some(OverlayHighlights::single(highlight, pos..pos + 1))
     }
 
-    pub fn tabstop_highlights(doc: &Document, theme: &Theme) -> Option<OverlayHighlights> {
-        let snippet = doc.active_snippet.as_ref()?;
-        let highlight = theme.find_highlight_exact("tabstop")?;
-        let mut ranges = Vec::new();
-        for tabstop in snippet.tabstops() {
-            ranges.extend(tabstop.ranges.iter().map(|range| range.start..range.end));
-        }
-        Some(OverlayHighlights::Homogeneous { highlight, ranges })
-    }
-
     /// Render bufferline at the top
     pub fn render_bufferline(editor: &Editor, viewport: Rect, surface: &mut Surface) {
         let scratch = PathBuf::from(SCRATCH_BUFFER_NAME); // default filename to use for scratch buffer
@@ -1113,21 +1100,12 @@ impl EditorView {
                 CompleteAction::Applied {
                     trigger_offset,
                     changes,
-                    placeholder,
+                    ..
                 } => {
                     self.last_insert.1.push(InsertEvent::CompletionApply {
                         trigger_offset,
                         changes,
                     });
-                    on_next_key = placeholder.then_some(Box::new(|cx, key| {
-                        if let Some(c) = key.char() {
-                            let (view, doc) = current!(cx.editor);
-                            if let Some(snippet) = &doc.active_snippet {
-                                doc.apply(&snippet.delete_placeholder(doc.text()), view.id);
-                            }
-                            commands::insert::insert_char(cx, c);
-                        }
-                    }))
                 }
                 CompleteAction::Selected { savepoint } => {
                     let (view, doc) = current!(editor);
