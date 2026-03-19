@@ -3447,12 +3447,14 @@ fn changed_file_picker(cx: &mut Context) {
     // Stream items in background
     let cwd_clone = cwd.clone();
     tokio::task::spawn_blocking(move || {
-        // Push local changes entry first
-        let local_item = GitViewItem::LocalChanges {
-            cwd: cwd_clone.clone(),
-        };
-        if injector.push(local_item).is_err() {
-            return;
+        // Push local changes entry if there are any
+        if diff_providers.get_local_diff(&cwd_clone).map_or(false, |d| !d.is_empty()) {
+            let local_item = GitViewItem::LocalChanges {
+                cwd: cwd_clone.clone(),
+            };
+            if injector.push(local_item).is_err() {
+                return;
+            }
         }
 
         // Push commits
