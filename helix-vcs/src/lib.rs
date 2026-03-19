@@ -9,6 +9,15 @@ use std::{
     sync::Arc,
 };
 
+/// Information about a single git commit.
+pub struct CommitInfo {
+    pub hash: String,
+    pub short_hash: String,
+    pub message: String,
+    pub author: String,
+    pub date: String,
+}
+
 #[cfg(feature = "git")]
 mod git;
 
@@ -78,6 +87,42 @@ impl DiffProviderRegistry {
             }
         });
     }
+
+    pub fn get_commit_log(&self, cwd: &Path, max_count: usize) -> Option<Vec<CommitInfo>> {
+        self.providers
+            .iter()
+            .find_map(|provider| match provider.get_commit_log(cwd, max_count) {
+                Ok(res) => Some(res),
+                Err(err) => {
+                    log::debug!("{err:#?}");
+                    None
+                }
+            })
+    }
+
+    pub fn get_commit_diff(&self, cwd: &Path, hash: &str) -> Option<String> {
+        self.providers
+            .iter()
+            .find_map(|provider| match provider.get_commit_diff(cwd, hash) {
+                Ok(res) => Some(res),
+                Err(err) => {
+                    log::debug!("{err:#?}");
+                    None
+                }
+            })
+    }
+
+    pub fn get_local_diff(&self, cwd: &Path) -> Option<String> {
+        self.providers
+            .iter()
+            .find_map(|provider| match provider.get_local_diff(cwd) {
+                Ok(res) => Some(res),
+                Err(err) => {
+                    log::debug!("{err:#?}");
+                    None
+                }
+            })
+    }
 }
 
 impl Default for DiffProviderRegistry {
@@ -129,6 +174,30 @@ impl DiffProvider {
         match self {
             #[cfg(feature = "git")]
             Self::Git => git::for_each_changed_file(cwd, f),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn get_commit_log(&self, cwd: &Path, max_count: usize) -> Result<Vec<CommitInfo>> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::get_commit_log(cwd, max_count),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn get_commit_diff(&self, cwd: &Path, hash: &str) -> Result<String> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::get_commit_diff(cwd, hash),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn get_local_diff(&self, cwd: &Path) -> Result<String> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::get_local_diff(cwd),
             Self::None => bail!("No diff support compiled in"),
         }
     }

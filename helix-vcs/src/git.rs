@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use arc_swap::ArcSwap;
 use gix::filter::plumbing::driver::apply::Delay;
+use std::fmt::Write as _;
 use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
@@ -16,8 +17,7 @@ use gix::status::{
     UntrackedFiles,
 };
 use gix::{Commit, ObjectId, Repository, ThreadSafeRepository};
-
-use crate::FileChange;
+use crate::{CommitInfo, FileChange};
 
 #[cfg(test)]
 mod test;
@@ -224,4 +224,330 @@ fn find_file_in_commit(repo: &Repository, commit: &Commit, file: &Path) -> Resul
         // found a file
         EntryKind::Blob | EntryKind::BlobExecutable => Ok(tree_entry.object_id()),
     }
+}
+
+fn format_relative_time(seconds_since_epoch: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let delta = now - seconds_since_epoch;
+    if delta < 60 {
+        "just now".to_string()
+    } else if delta < 3600 {
+        let mins = delta / 60;
+        format!("{mins} min ago")
+    } else if delta < 86400 {
+        let hours = delta / 3600;
+        format!("{hours} hours ago")
+    } else if delta < 86400 * 30 {
+        let days = delta / 86400;
+        format!("{days} days ago")
+    } else if delta < 86400 * 365 {
+        let months = delta / (86400 * 30);
+        format!("{months} months ago")
+    } else {
+        let years = delta / (86400 * 365);
+        format!("{years} years ago")
+    }
+}
+
+pub fn get_commit_log(cwd: &Path, max_count: usize) -> Result<Vec<CommitInfo>> {
+    let repo = open_repo(cwd)?.to_thread_local();
+    let head = repo.head_commit()?;
+    let mut commits = Vec::with_capacity(max_count);
+
+    let walk = head.ancestors().all()?;
+    for info in walk.take(max_count) {
+        let info = info?;
+        let commit = info.object()?;
+        let hash = commit.id.to_string();
+        let short_hash = commit.id.to_hex_with_len(7).to_string();
+        let message = commit
+            .message()?
+            .summary()
+            .to_string();
+        let author_sig = commit.author()?;
+        let author = author_sig.name.to_string();
+        let date = author_sig
+            .time()
+            .map(|t| format_relative_time(t.seconds))
+            .unwrap_or_default();
+
+        commits.push(CommitInfo {
+            hash,
+            short_hash,
+            message,
+            author,
+            date,
+        });
+    }
+
+    Ok(commits)
+}
+
+/// Generate a unified diff string for a given file between two blob contents.
+fn unified_diff_for_blobs(old: &[u8], new: &[u8], old_name: &str, new_name: &str) -> String {
+    let old_str = String::from_utf8_lossy(old);
+    let new_str = String::from_utf8_lossy(new);
+
+    let input = imara_diff::InternedInput::new(old_str.as_ref(), new_str.as_ref());
+    let mut diff = imara_diff::Diff::default();
+    diff.compute_with(
+        imara_diff::Algorithm::Histogram,
+        &input.before,
+        &input.after,
+        input.interner.num_tokens(),
+    );
+
+    let printer = imara_diff::BasicLineDiffPrinter(&input.interner);
+    let unified = diff.unified_diff(
+        &printer,
+        imara_diff::UnifiedDiffConfig::default(),
+        &input,
+    );
+    let unified_str = unified.to_string();
+    if unified_str.is_empty() {
+        return String::new();
+    }
+
+    let mut result = String::new();
+    let _ = writeln!(result, "--- a/{old_name}");
+    let _ = writeln!(result, "+++ b/{new_name}");
+    result.push_str(&unified_str);
+    result
+}
+
+/// Generate a unified diff for a commit vs its parent.
+pub fn get_commit_diff(cwd: &Path, commit_hash: &str) -> Result<String> {
+    let repo = open_repo(cwd)?.to_thread_local();
+    let oid = gix::ObjectId::from_hex(commit_hash.as_bytes())?;
+    let commit = repo.find_commit(oid)?;
+    let tree = commit.tree()?;
+
+    let parent_tree = commit
+        .parent_ids()
+        .next()
+        .and_then(|pid| pid.object().ok())
+        .and_then(|obj| obj.into_commit().tree().ok());
+
+    let mut output = String::new();
+
+    // Compare trees entry by entry
+    diff_trees(&repo, parent_tree.as_ref(), &tree, "", &mut output)?;
+
+    Ok(output)
+}
+
+fn collect_tree_entries(
+    tree: &gix::Tree<'_>,
+) -> Result<std::collections::BTreeMap<String, (EntryKind, ObjectId)>> {
+    let mut entries = std::collections::BTreeMap::new();
+    for entry in tree.iter() {
+        let entry = entry?;
+        let name = entry.filename().to_string();
+        entries.insert(name, (entry.mode().kind(), entry.object_id()));
+    }
+    Ok(entries)
+}
+
+fn diff_trees(
+    repo: &Repository,
+    old_tree: Option<&gix::Tree<'_>>,
+    new_tree: &gix::Tree<'_>,
+    prefix: &str,
+    output: &mut String,
+) -> Result<()> {
+    let old_entries = match old_tree {
+        Some(t) => collect_tree_entries(t)?,
+        None => std::collections::BTreeMap::new(),
+    };
+    let new_entries = collect_tree_entries(new_tree)?;
+
+    // All paths from both trees
+    let mut all_paths: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for k in old_entries.keys() {
+        all_paths.insert(k.as_str());
+    }
+    for k in new_entries.keys() {
+        all_paths.insert(k.as_str());
+    }
+
+    for name in all_paths {
+        let path = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        };
+
+        let old_entry = old_entries.get(name);
+        let new_entry = new_entries.get(name);
+
+        match (old_entry, new_entry) {
+            (Some(&(EntryKind::Tree, old_oid)), Some(&(EntryKind::Tree, new_oid))) => {
+                if old_oid != new_oid {
+                    let old_t = repo.find_object(old_oid)?.into_tree();
+                    let new_t = repo.find_object(new_oid)?.into_tree();
+                    diff_trees(repo, Some(&old_t), &new_t, &path, output)?;
+                }
+            }
+            (None, Some(&(EntryKind::Tree, new_oid))) => {
+                let new_t = repo.find_object(new_oid)?.into_tree();
+                diff_trees(repo, None, &new_t, &path, output)?;
+            }
+            (Some(&(EntryKind::Tree, old_oid)), None) => {
+                let old_t = repo.find_object(old_oid)?.into_tree();
+                diff_deleted_tree(repo, &old_t, &path, output)?;
+            }
+            (Some(&(_, old_oid)), Some(&(_, new_oid)))
+                if matches!(
+                    old_entries.get(name).map(|e| e.0),
+                    Some(EntryKind::Blob | EntryKind::BlobExecutable)
+                ) && matches!(
+                    new_entries.get(name).map(|e| e.0),
+                    Some(EntryKind::Blob | EntryKind::BlobExecutable)
+                ) =>
+            {
+                if old_oid != new_oid {
+                    let old_blob = repo.find_object(old_oid)?.detach().data;
+                    let new_blob = repo.find_object(new_oid)?.detach().data;
+                    let diff_text = unified_diff_for_blobs(&old_blob, &new_blob, &path, &path);
+                    if !diff_text.is_empty() {
+                        output.push_str(&diff_text);
+                    }
+                }
+            }
+            (None, Some(&(kind, new_oid)))
+                if matches!(kind, EntryKind::Blob | EntryKind::BlobExecutable) =>
+            {
+                let new_blob = repo.find_object(new_oid)?.detach().data;
+                let diff_text = unified_diff_for_blobs(&[], &new_blob, &path, &path);
+                if !diff_text.is_empty() {
+                    output.push_str(&diff_text);
+                }
+            }
+            (Some(&(kind, old_oid)), None)
+                if matches!(kind, EntryKind::Blob | EntryKind::BlobExecutable) =>
+            {
+                let old_blob = repo.find_object(old_oid)?.detach().data;
+                let diff_text = unified_diff_for_blobs(&old_blob, &[], &path, &path);
+                if !diff_text.is_empty() {
+                    output.push_str(&diff_text);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn diff_deleted_tree(
+    repo: &Repository,
+    tree: &gix::Tree<'_>,
+    prefix: &str,
+    output: &mut String,
+) -> Result<()> {
+    for entry in tree.iter() {
+        let entry = entry?;
+        let name = entry.filename().to_string();
+        let path = format!("{prefix}/{name}");
+        match entry.mode().kind() {
+            EntryKind::Tree => {
+                let sub = repo.find_object(entry.object_id())?.into_tree();
+                diff_deleted_tree(repo, &sub, &path, output)?;
+            }
+            EntryKind::Blob | EntryKind::BlobExecutable => {
+                let old_blob = repo.find_object(entry.object_id())?.detach().data;
+                let diff_text = unified_diff_for_blobs(&old_blob, &[], &path, &path);
+                if !diff_text.is_empty() {
+                    output.push_str(&diff_text);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Generate a unified diff of local working tree changes vs HEAD.
+pub fn get_local_diff(cwd: &Path) -> Result<String> {
+    let repo = open_repo(cwd)?.to_thread_local();
+    let work_dir = repo
+        .workdir()
+        .context("no working tree")?
+        .to_path_buf();
+    let head = repo.head_commit()?;
+
+    // Collect changed files first, then generate diffs
+    let changes = std::cell::RefCell::new(Vec::new());
+    status(&repo, |change| {
+        if let Ok(change) = change {
+            changes.borrow_mut().push(change);
+        }
+        true
+    })?;
+    let changes = changes.into_inner();
+
+    let mut output = String::new();
+    for change in &changes {
+        let result: Result<()> = (|| {
+            match change {
+                FileChange::Modified { path } | FileChange::Conflict { path } => {
+                    let old_oid = find_file_in_commit(&repo, &head, path)?;
+                    let old_blob = repo.find_object(old_oid)?.detach().data;
+                    let new_blob = std::fs::read(path)?;
+                    let rel = path.strip_prefix(&work_dir).unwrap_or(path);
+                    let rel_str = rel.to_string_lossy();
+                    let diff_text =
+                        unified_diff_for_blobs(&old_blob, &new_blob, &rel_str, &rel_str);
+                    if !diff_text.is_empty() {
+                        output.push_str(&diff_text);
+                    }
+                }
+                FileChange::Untracked { path } => {
+                    let new_blob = std::fs::read(path)?;
+                    let rel = path.strip_prefix(&work_dir).unwrap_or(path);
+                    let rel_str = rel.to_string_lossy();
+                    let diff_text = unified_diff_for_blobs(&[], &new_blob, &rel_str, &rel_str);
+                    if !diff_text.is_empty() {
+                        output.push_str(&diff_text);
+                    }
+                }
+                FileChange::Deleted { path } => {
+                    let old_oid = find_file_in_commit(&repo, &head, path)?;
+                    let old_blob = repo.find_object(old_oid)?.detach().data;
+                    let rel = path.strip_prefix(&work_dir).unwrap_or(path);
+                    let rel_str = rel.to_string_lossy();
+                    let diff_text = unified_diff_for_blobs(&old_blob, &[], &rel_str, &rel_str);
+                    if !diff_text.is_empty() {
+                        output.push_str(&diff_text);
+                    }
+                }
+                FileChange::Renamed {
+                    from_path, to_path, ..
+                } => {
+                    let old_oid = find_file_in_commit(&repo, &head, from_path)?;
+                    let old_blob = repo.find_object(old_oid)?.detach().data;
+                    let new_blob = std::fs::read(to_path)?;
+                    let old_rel = from_path.strip_prefix(&work_dir).unwrap_or(from_path);
+                    let new_rel = to_path.strip_prefix(&work_dir).unwrap_or(to_path);
+                    let diff_text = unified_diff_for_blobs(
+                        &old_blob,
+                        &new_blob,
+                        &old_rel.to_string_lossy(),
+                        &new_rel.to_string_lossy(),
+                    );
+                    if !diff_text.is_empty() {
+                        output.push_str(&diff_text);
+                    }
+                }
+            }
+            Ok(())
+        })();
+        if let Err(e) = result {
+            log::debug!("Error generating diff for file: {e:#}");
+        }
+    }
+
+    Ok(output)
 }

@@ -259,6 +259,10 @@ pub struct Picker<T: 'static + Send + Sync, D: 'static> {
 
     callback_fn: PickerCallback<T>,
     default_action: Action,
+    /// When true, j/k navigate the list and the prompt is hidden.
+    vi_nav: bool,
+    /// Line offset for preview scrolling.
+    preview_scroll: usize,
 
     pub truncate_start: bool,
     /// Caches paths to documents
@@ -387,6 +391,8 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
             show_preview: true,
             callback_fn: Box::new(callback_fn),
             default_action: Action::Replace,
+            vi_nav: false,
+            preview_scroll: 0,
             completion_height: 0,
             widths,
             preview_cache: HashMap::new(),
@@ -410,6 +416,12 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
 
     pub fn truncate_start(mut self, truncate_start: bool) -> Self {
         self.truncate_start = truncate_start;
+        self
+    }
+
+    /// Enable vi-style navigation (j/k) and hide the search prompt.
+    pub fn with_vi_nav(mut self) -> Self {
+        self.vi_nav = true;
         self
     }
 
@@ -464,6 +476,7 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
             return;
         }
 
+        let old = self.cursor;
         match direction {
             Direction::Forward => {
                 self.cursor = self.cursor.saturating_add(amount) % len;
@@ -471,6 +484,9 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
             Direction::Backward => {
                 self.cursor = self.cursor.saturating_add(len).saturating_sub(amount) % len;
             }
+        }
+        if self.cursor != old {
+            self.preview_scroll = 0;
         }
     }
 
@@ -487,6 +503,7 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
     /// Move the cursor to the first entry
     pub fn to_start(&mut self) {
         self.cursor = 0;
+        self.preview_scroll = 0;
     }
 
     /// Move the cursor to the last entry
@@ -496,6 +513,7 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
             .snapshot()
             .matched_item_count()
             .saturating_sub(1);
+        self.preview_scroll = 0;
     }
 
     pub fn selection(&self) -> Option<&T> {
@@ -719,32 +737,56 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
             snapshot.item_count(),
         );
 
-        let area = inner.clip_left(1).with_height(1);
-        let line_area = area.clip_right(count.len() as u16 + 1);
+        let inner = if self.vi_nav {
+            // Skip prompt rendering, just show the count
+            let area = inner.clip_left(1).with_height(1);
+            surface.set_stringn(
+                (area.x + area.width).saturating_sub(count.len() as u16 + 1),
+                area.y,
+                &count,
+                (count.len()).min(area.width as usize),
+                text_style,
+            );
 
-        // render the prompt first since it will clear its background
-        self.prompt.render(line_area, surface, cx);
-
-        surface.set_stringn(
-            (area.x + area.width).saturating_sub(count.len() as u16 + 1),
-            area.y,
-            &count,
-            (count.len()).min(area.width as usize),
-            text_style,
-        );
-
-        // -- Separator
-        let sep_style = cx.editor.theme.get("ui.background.separator");
-        let borders = BorderType::line_symbols(BorderType::Plain);
-        for x in inner.left()..inner.right() {
-            if let Some(cell) = surface.get_mut(x, inner.y + 1) {
-                cell.set_symbol(borders.horizontal).set_style(sep_style);
+            // Separator
+            let sep_style = cx.editor.theme.get("ui.background.separator");
+            let borders = BorderType::line_symbols(BorderType::Plain);
+            for x in inner.left()..inner.right() {
+                if let Some(cell) = surface.get_mut(x, inner.y + 1) {
+                    cell.set_symbol(borders.horizontal).set_style(sep_style);
+                }
             }
-        }
+
+            inner.clip_top(2)
+        } else {
+            let area = inner.clip_left(1).with_height(1);
+            let line_area = area.clip_right(count.len() as u16 + 1);
+
+            // render the prompt first since it will clear its background
+            self.prompt.render(line_area, surface, cx);
+
+            surface.set_stringn(
+                (area.x + area.width).saturating_sub(count.len() as u16 + 1),
+                area.y,
+                &count,
+                (count.len()).min(area.width as usize),
+                text_style,
+            );
+
+            // -- Separator
+            let sep_style = cx.editor.theme.get("ui.background.separator");
+            let borders = BorderType::line_symbols(BorderType::Plain);
+            for x in inner.left()..inner.right() {
+                if let Some(cell) = surface.get_mut(x, inner.y + 1) {
+                    cell.set_symbol(borders.horizontal).set_style(sep_style);
+                }
+            }
+
+            // subtract area of prompt from top
+            inner.clip_top(2)
+        };
 
         // -- Render the contents:
-        // subtract area of prompt from top
-        let inner = inner.clip_top(2);
         let rows = inner.height.saturating_sub(self.header_height()) as u32;
         let offset = self.cursor - (self.cursor % std::cmp::max(1, rows));
         let cursor = self.cursor.saturating_sub(offset);
@@ -897,6 +939,7 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
         let inner = inner.inner(margin);
         BLOCK.render(area, surface);
 
+        let preview_scroll = self.preview_scroll;
         if let Some((preview, range)) = self.get_preview(cx.editor) {
             let doc = match preview.document() {
                 Some(doc)
@@ -932,6 +975,11 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
             };
 
             let mut offset = ViewPosition::default();
+            if preview_scroll > 0 {
+                let text = doc.text().slice(..);
+                let scroll_line = preview_scroll.min(doc.text().len_lines().saturating_sub(1));
+                offset.anchor = text.line_to_char(scroll_line);
+            }
             if let Some((start_line, end_line)) = range {
                 let height = end_line - start_line;
                 let text = doc.text().slice(..);
@@ -1091,6 +1139,18 @@ impl<I: 'static + Send + Sync, D: 'static + Send + Sync> Component for Picker<I,
             key!(Tab) | key!(Down) | ctrl!('n') => {
                 self.move_by(1, Direction::Forward);
             }
+            key!('k') if self.vi_nav => {
+                self.move_by(1, Direction::Backward);
+            }
+            key!('j') if self.vi_nav => {
+                self.move_by(1, Direction::Forward);
+            }
+            key!('g') if self.vi_nav => {
+                self.to_start();
+            }
+            key!('G') if self.vi_nav => {
+                self.to_end();
+            }
             key!(PageDown) | ctrl!('d') => {
                 self.page_down();
             }
@@ -1159,6 +1219,15 @@ impl<I: 'static + Send + Sync, D: 'static + Send + Sync> Component for Picker<I,
             ctrl!('t') => {
                 self.toggle_preview();
             }
+            ctrl!('f') => {
+                self.preview_scroll = self.preview_scroll.saturating_add(15);
+            }
+            ctrl!('b') => {
+                self.preview_scroll = self.preview_scroll.saturating_sub(15);
+            }
+            _ if self.vi_nav => {
+                // In vi_nav mode, ignore keys that would go to the prompt.
+            }
             _ => {
                 self.prompt_handle_event(event, ctx);
             }
@@ -1168,6 +1237,10 @@ impl<I: 'static + Send + Sync, D: 'static + Send + Sync> Component for Picker<I,
     }
 
     fn cursor(&self, area: Rect, editor: &Editor) -> (Option<Position>, CursorKind) {
+        if self.vi_nav {
+            return (None, CursorKind::Hidden);
+        }
+
         let block = Block::bordered();
         // calculate the inner area inside the box
         let inner = block.inner(area);

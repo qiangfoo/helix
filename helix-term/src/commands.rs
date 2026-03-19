@@ -8,7 +8,7 @@ use helix_stdx::{
     path::{self, find_paths},
     rope::{self, RopeSliceExt},
 };
-use helix_vcs::{FileChange, Hunk};
+use helix_vcs::{CommitInfo, FileChange, Hunk};
 pub use lsp::*;
 pub use syntax::*;
 use tui::{
@@ -3356,13 +3356,50 @@ fn jumplist_picker(cx: &mut Context) {
 }
 
 fn changed_file_picker(cx: &mut Context) {
-    pub struct FileChangeData {
-        cwd: PathBuf,
-        style_untracked: Style,
-        style_modified: Style,
-        style_conflict: Style,
-        style_deleted: Style,
-        style_renamed: Style,
+    use std::sync::Arc;
+    use once_cell::sync::OnceCell;
+
+    enum GitViewItem {
+        LocalChanges {
+            diff_file: OnceCell<PathBuf>,
+            temp_dir: Arc<tempfile::TempDir>,
+            cwd: PathBuf,
+        },
+        Commit {
+            info: CommitInfo,
+            diff_file: OnceCell<PathBuf>,
+            temp_dir: Arc<tempfile::TempDir>,
+            cwd: PathBuf,
+        },
+    }
+
+    impl GitViewItem {
+        fn get_diff_path(&self, diff_providers: &helix_vcs::DiffProviderRegistry) -> Option<&Path> {
+            match self {
+                GitViewItem::LocalChanges { diff_file, temp_dir, cwd } => {
+                    Some(diff_file.get_or_init(|| {
+                        let diff_text = diff_providers.get_local_diff(cwd).unwrap_or_default();
+                        let path = temp_dir.path().join("local.diff");
+                        let _ = std::fs::write(&path, &diff_text);
+                        path
+                    }).as_path())
+                }
+                GitViewItem::Commit { info, diff_file, temp_dir, cwd } => {
+                    Some(diff_file.get_or_init(|| {
+                        let diff_text = diff_providers.get_commit_diff(cwd, &info.hash).unwrap_or_default();
+                        let path = temp_dir.path().join(format!("{}.diff", info.hash));
+                        let _ = std::fs::write(&path, &diff_text);
+                        path
+                    }).as_path())
+                }
+            }
+        }
+    }
+
+    struct GitViewData {
+        style_local: Style,
+        style_commit: Style,
+        diff_providers: helix_vcs::DiffProviderRegistry,
     }
 
     let cwd = helix_stdx::env::current_working_dir();
@@ -3372,80 +3409,100 @@ fn changed_file_picker(cx: &mut Context) {
         return;
     }
 
-    let added = cx.editor.theme.get("diff.plus");
-    let modified = cx.editor.theme.get("diff.delta");
-    let conflict = cx.editor.theme.get("diff.delta.conflict");
-    let deleted = cx.editor.theme.get("diff.minus");
-    let renamed = cx.editor.theme.get("diff.delta.moved");
+    let temp_dir = match tempfile::tempdir() {
+        Ok(dir) => Arc::new(dir),
+        Err(e) => {
+            cx.editor.set_error(format!("Failed to create temp dir: {e}"));
+            return;
+        }
+    };
+
+    let style_local = cx.editor.theme.get("diff.delta");
+    let style_commit = cx.editor.theme.get("ui.text");
+    let diff_providers = cx.editor.diff_providers.clone();
 
     let columns = [
-        PickerColumn::new("change", |change: &FileChange, data: &FileChangeData| {
-            match change {
-                FileChange::Untracked { .. } => Span::styled("+ untracked", data.style_untracked),
-                FileChange::Modified { .. } => Span::styled("~ modified", data.style_modified),
-                FileChange::Conflict { .. } => Span::styled("x conflict", data.style_conflict),
-                FileChange::Deleted { .. } => Span::styled("- deleted", data.style_deleted),
-                FileChange::Renamed { .. } => Span::styled("> renamed", data.style_renamed),
+        PickerColumn::new("hash", |item: &GitViewItem, _data: &GitViewData| {
+            match item {
+                GitViewItem::LocalChanges { .. } => "".into(),
+                GitViewItem::Commit { info, .. } => info.short_hash.as_str().into(),
             }
-            .into()
         }),
-        PickerColumn::new("path", |change: &FileChange, data: &FileChangeData| {
-            let display_path = |path: &PathBuf| {
-                path.strip_prefix(&data.cwd)
-                    .unwrap_or(path)
-                    .display()
-                    .to_string()
-            };
-            match change {
-                FileChange::Untracked { path } => display_path(path),
-                FileChange::Modified { path } => display_path(path),
-                FileChange::Conflict { path } => display_path(path),
-                FileChange::Deleted { path } => display_path(path),
-                FileChange::Renamed { from_path, to_path } => {
-                    format!("{} -> {}", display_path(from_path), display_path(to_path))
+        PickerColumn::new("message", |item: &GitViewItem, data: &GitViewData| {
+            match item {
+                GitViewItem::LocalChanges { .. } => {
+                    Span::styled("Local changes", data.style_local).into()
                 }
+                GitViewItem::Commit { info, .. } => info.message.as_str().into(),
             }
-            .into()
+        }),
+        PickerColumn::new("author", |item: &GitViewItem, _data: &GitViewData| {
+            match item {
+                GitViewItem::LocalChanges { .. } => "".into(),
+                GitViewItem::Commit { info, .. } => info.author.as_str().into(),
+            }
+        }),
+        PickerColumn::new("date", |item: &GitViewItem, _data: &GitViewData| {
+            match item {
+                GitViewItem::LocalChanges { .. } => "".into(),
+                GitViewItem::Commit { info, .. } => info.date.as_str().into(),
+            }
         }),
     ];
 
+    let data = GitViewData {
+        style_local,
+        style_commit,
+        diff_providers: diff_providers.clone(),
+    };
+
     let picker = Picker::new(
         columns,
-        1, // path
+        2, // message column for filtering
         [],
-        FileChangeData {
-            cwd: cwd.clone(),
-            style_untracked: added,
-            style_modified: modified,
-            style_conflict: conflict,
-            style_deleted: deleted,
-            style_renamed: renamed,
-        },
-        |cx, meta: &FileChange, action| {
-            let path_to_open = meta.path();
-            if let Err(e) = cx.editor.open(path_to_open, action) {
-                let err = if let Some(err) = e.source() {
-                    format!("{}", err)
-                } else {
-                    format!("unable to open \"{}\"", path_to_open.display())
-                };
-                cx.editor.set_error(err);
-            }
+        data,
+        |_cx, _item: &GitViewItem, _action| {
+            // No-op on select for now
         },
     )
-    .with_preview(|_editor, meta| Some((meta.path().into(), None)));
+    .with_preview(|editor, item| {
+        let path = item.get_diff_path(&editor.diff_providers)?;
+        Some((path.into(), None))
+    })
+    .with_vi_nav();
+
     let injector = picker.injector();
 
-    cx.editor
-        .diff_providers
-        .clone()
-        .for_each_changed_file(cwd, move |change| match change {
-            Ok(change) => injector.push(change).is_ok(),
-            Err(err) => {
-                status::report_blocking(err);
-                true
+    // Stream items in background
+    let cwd_clone = cwd.clone();
+    let temp_dir_clone = temp_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        // Push local changes entry first
+        let local_item = GitViewItem::LocalChanges {
+            diff_file: OnceCell::new(),
+            temp_dir: temp_dir_clone.clone(),
+            cwd: cwd_clone.clone(),
+        };
+        if injector.push(local_item).is_err() {
+            return;
+        }
+
+        // Push commits
+        if let Some(commits) = diff_providers.get_commit_log(&cwd_clone, 50) {
+            for commit in commits {
+                let item = GitViewItem::Commit {
+                    info: commit,
+                    diff_file: OnceCell::new(),
+                    temp_dir: temp_dir_clone.clone(),
+                    cwd: cwd_clone.clone(),
+                };
+                if injector.push(item).is_err() {
+                    break;
+                }
             }
-        });
+        }
+    });
+
     cx.push_layer(Box::new(overlaid(picker)));
 }
 
