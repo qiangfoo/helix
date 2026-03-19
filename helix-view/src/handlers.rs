@@ -1,9 +1,17 @@
+use std::path::PathBuf;
+
 use completion::{CompletionEvent, CompletionHandler};
 use helix_event::send_blocking;
 use tokio::sync::mpsc::Sender;
 
 use crate::handlers::lsp::SignatureHelpInvoked;
 use crate::{DocumentId, Editor, ViewId};
+
+#[derive(Debug)]
+pub enum FileWatcherCommand {
+    Watch { path: PathBuf },
+    Unwatch { path: PathBuf },
+}
 
 pub mod completion;
 pub mod diagnostics;
@@ -26,6 +34,7 @@ pub struct Handlers {
     pub word_index: word_index::Handler,
     pub pull_diagnostics: Sender<lsp::PullDiagnosticsEvent>,
     pub pull_all_documents_diagnostics: Sender<lsp::PullAllDocumentsDiagnosticsEvent>,
+    pub file_watcher: Sender<FileWatcherCommand>,
 }
 
 impl Handlers {
