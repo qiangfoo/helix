@@ -3264,12 +3264,20 @@ fn changed_file_picker(cx: &mut Context) {
                 cx.editor.set_status("No changes");
                 return;
             }
-            let doc = Document::from(
+            let name = match item {
+                GitViewItem::LocalChanges { .. } => "[local-changes]".to_string(),
+                GitViewItem::Commit { info, .. } => {
+                    let short = if info.hash.len() > 7 { &info.hash[..7] } else { &info.hash };
+                    format!("[{short}]")
+                }
+            };
+            let mut doc = Document::from(
                 Rope::from(diff_text.as_str()),
                 None,
                 cx.editor.config.clone(),
                 cx.editor.syn_loader.clone(),
             );
+            doc.set_path(Some(std::path::Path::new(&name)));
             let id = cx.editor.new_file_from_document(Action::Replace, doc);
             let loader = cx.editor.syn_loader.load();
             let _ = doc_mut!(cx.editor, &id).set_language_by_language_id("diff", &loader);
