@@ -316,7 +316,18 @@ pub fn symbol_picker(cx: &mut Context) {
         uri: &Uri,
         symbol: lsp::DocumentSymbol,
         offset_encoding: OffsetEncoding,
+        parent_kind: Option<lsp::SymbolKind>,
     ) {
+        // Skip function arguments (variables nested inside functions/methods)
+        let is_function_arg = symbol.kind == lsp::SymbolKind::VARIABLE
+            && matches!(
+                parent_kind,
+                Some(lsp::SymbolKind::FUNCTION | lsp::SymbolKind::METHOD)
+            );
+        if is_function_arg {
+            return;
+        }
+        let kind = symbol.kind;
         #[allow(deprecated)]
         list.push(SymbolInformationItem {
             symbol: lsp::SymbolInformation {
@@ -334,7 +345,7 @@ pub fn symbol_picker(cx: &mut Context) {
             },
         });
         for child in symbol.children.into_iter().flatten() {
-            nested_to_flat(list, file, uri, child, offset_encoding);
+            nested_to_flat(list, file, uri, child, offset_encoding, Some(kind));
         }
     }
     let doc = doc!(cx.editor);
@@ -362,6 +373,11 @@ pub fn symbol_picker(cx: &mut Context) {
                 let symbols = match symbols {
                     lsp::DocumentSymbolResponse::Flat(symbols) => symbols
                         .into_iter()
+                        .filter(|symbol| {
+                            // Skip function arguments (variables with a container)
+                            !(symbol.kind == lsp::SymbolKind::VARIABLE
+                                && symbol.container_name.is_some())
+                        })
                         .map(|symbol| SymbolInformationItem {
                             location: Location {
                                 uri: doc_uri.clone(),
@@ -380,6 +396,7 @@ pub fn symbol_picker(cx: &mut Context) {
                                 &doc_uri,
                                 symbol,
                                 offset_encoding,
+                                None,
                             )
                         }
                         flat_symbols
