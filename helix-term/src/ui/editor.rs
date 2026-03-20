@@ -28,7 +28,7 @@ use helix_view::{
     graphics::{Color, CursorKind, Modifier, Rect, Style},
     input::{KeyEvent, MouseButton, MouseEvent, MouseEventKind},
     keyboard::{KeyCode, KeyModifiers},
-    Document, Editor, Theme, View,
+    Document, DocumentId, Editor, Theme, View,
 };
 use std::{mem::take, num::NonZeroUsize, ops, path::PathBuf, rc::Rc};
 
@@ -41,6 +41,8 @@ pub struct EditorView {
     spinners: ProgressSpinners,
     /// Tracks if the terminal window is focused by reaction to terminal focus events
     terminal_focused: bool,
+    /// Tab regions for mouse click handling: (x_start, x_end, document_id)
+    tab_regions: Vec<(u16, u16, DocumentId)>,
 }
 
 impl EditorView {
@@ -51,6 +53,7 @@ impl EditorView {
             pseudo_pending: Vec::new(),
             spinners: ProgressSpinners::default(),
             terminal_focused: true,
+            tab_regions: Vec::new(),
         }
     }
 
@@ -609,16 +612,13 @@ impl EditorView {
         Some(OverlayHighlights::single(highlight, pos..pos + 1))
     }
 
-    /// Render bufferline at the top
-    pub fn render_bufferline(editor: &Editor, viewport: Rect, surface: &mut Surface) {
-        let scratch = PathBuf::from(SCRATCH_BUFFER_NAME); // default filename to use for scratch buffer
-        surface.clear_with(
-            viewport,
-            editor
-                .theme
-                .try_get("ui.bufferline.background")
-                .unwrap_or_else(|| editor.theme.get("ui.statusline")),
-        );
+    /// Render bufferline at the top (2 lines: tabs + underline indicator)
+    pub fn render_bufferline(
+        editor: &Editor,
+        viewport: Rect,
+        surface: &mut Surface,
+    ) -> Vec<(u16, u16, DocumentId)> {
+        let scratch = PathBuf::from(SCRATCH_BUFFER_NAME);
 
         let bufferline_active = editor
             .theme
@@ -632,6 +632,7 @@ impl EditorView {
 
         let mut x = viewport.x;
         let current_doc = view!(editor).doc;
+        let mut tab_regions = Vec::new();
 
         for doc in editor.documents() {
             let fname = doc
@@ -642,24 +643,43 @@ impl EditorView {
                 .to_str()
                 .unwrap_or_default();
 
-            let style = if current_doc == doc.id() {
+            let is_active = current_doc == doc.id();
+            let style = if is_active {
                 bufferline_active
+                    .underline_style(helix_view::graphics::UnderlineStyle::Reset)
+                    .underline_color(Color::Reset)
             } else {
-                bufferline_inactive
+                bufferline_inactive.bg(Color::Reset)
             };
 
-            let text = format!(" {}{} ", fname, if doc.is_modified() { "[+]" } else { "" });
+            let text = format!(" {} ", fname);
             let used_width = viewport.x.saturating_sub(x);
             let rem_width = surface.area.width.saturating_sub(used_width);
 
+            let x_start = x;
+            // Text on row 2 (bottom), indicator on row 1 (top)
             x = surface
-                .set_stringn(x, viewport.y, text, rem_width as usize, style)
+                .set_stringn(x, viewport.y + 1, &text, rem_width as usize, style)
                 .0;
+
+            tab_regions.push((x_start, x, doc.id()));
+
+            // Draw top-bar indicator on first row for active tab
+            if is_active && viewport.height > 1 {
+                let indicator_style = bufferline_active
+                    .underline_style(helix_view::graphics::UnderlineStyle::Reset)
+                    .underline_color(Color::Reset);
+                for ix in x_start..x {
+                    surface.set_stringn(ix, viewport.y, "▔", 1, indicator_style);
+                }
+            }
 
             if x >= surface.area.right() {
                 break;
             }
         }
+
+        tab_regions
     }
 
     pub fn render_gutter<'d>(
@@ -1029,6 +1049,20 @@ impl EditorView {
 
         match kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                // Check if click is on the bufferline (tab bar)
+                if row < 2 {
+                    if let Some(&(_, _, doc_id)) = self
+                        .tab_regions
+                        .iter()
+                        .find(|(x_start, x_end, _)| column >= *x_start && column < *x_end)
+                    {
+                        let view_id = view!(cxt.editor).id;
+                        cxt.editor.switch(doc_id, helix_view::editor::Action::Replace);
+                        cxt.editor.ensure_cursor_in_view(view_id);
+                        return EventResult::Consumed(None);
+                    }
+                }
+
                 let editor = &mut cxt.editor;
 
                 if let Some((pos, view_id)) = pos_and_view(editor, row, column, true) {
@@ -1330,17 +1364,22 @@ impl Component for EditorView {
             _ => false,
         };
 
-        // -1 for commandline and -1 for bufferline
+        // -1 for commandline and -2 for bufferline
+        let bufferline_height: u16 = if use_bufferline { 2 } else { 0 };
         let mut editor_area = area.clip_bottom(1);
         if use_bufferline {
-            editor_area = editor_area.clip_top(1);
+            editor_area = editor_area.clip_top(bufferline_height);
         }
 
         // if the terminal size suddenly changed, we need to trigger a resize
         cx.editor.resize(editor_area);
 
         if use_bufferline {
-            Self::render_bufferline(cx.editor, area.with_height(1), surface);
+            self.tab_regions = Self::render_bufferline(
+                cx.editor,
+                area.with_height(bufferline_height),
+                surface,
+            );
         }
 
         for (view, is_focused) in cx.editor.tree.views() {
