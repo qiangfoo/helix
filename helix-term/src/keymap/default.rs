@@ -111,8 +111,8 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
         "*" => search_selection_detect_word_boundaries,
         "A-*" => search_selection,
 
-        "y" => yank,
-        "Y" => yank_main_selection_to_clipboard,
+        "y" => yank_location_to_clipboard,
+        "Y" => yank,
 
 
         "_" => trim_selections,
@@ -192,7 +192,6 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "k" => hover,
             "h" => select_references_to_symbol_under_cursor,
             "?" => command_palette,
-            "Y" => yank_location_to_clipboard,
         },
         "z" => { "View"
             "z" | "c" => align_view_center,
