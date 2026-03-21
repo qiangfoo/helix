@@ -400,11 +400,7 @@ fn yank_joined(cx: &mut compositor::Context, args: Args, event: PromptEvent) -> 
     let doc = doc!(cx.editor);
     let default_sep = Cow::Borrowed(doc.line_ending.as_str());
     let separator = args.first().unwrap_or(&default_sep);
-    let register = cx
-        .editor
-        .selected_register
-        .unwrap_or('"');
-    yank_joined_impl(cx.editor, separator, register);
+    yank_joined_impl(cx.editor, separator, '+');
     Ok(())
 }
 
@@ -1582,54 +1578,6 @@ fn refresh_config(
     Ok(())
 }
 
-fn clear_register(
-    cx: &mut compositor::Context,
-    args: Args,
-    event: PromptEvent,
-) -> anyhow::Result<()> {
-    if event != PromptEvent::Validate {
-        return Ok(());
-    }
-
-    if args.is_empty() {
-        cx.editor.registers.clear();
-        cx.editor.set_status("All registers cleared");
-        return Ok(());
-    }
-
-    ensure!(
-        args[0].chars().count() == 1,
-        format!("Invalid register {}", &args[0])
-    );
-    let register = args[0].chars().next().unwrap_or_default();
-    if cx.editor.registers.remove(register) {
-        cx.editor
-            .set_status(format!("Register {} cleared", register));
-    } else {
-        cx.editor
-            .set_error(format!("Register {} not found", register));
-    }
-    Ok(())
-}
-
-fn set_register(
-    cx: &mut compositor::Context,
-    args: Args,
-    event: PromptEvent,
-) -> anyhow::Result<()> {
-    if event != PromptEvent::Validate {
-        return Ok(());
-    }
-
-    ensure!(
-        args[0].chars().count() == 1,
-        format!("Invalid register {}", &args[0])
-    );
-
-    let register = args[0].chars().next().unwrap_or_default();
-    cx.editor.registers.write(register, vec![args[1].into()])
-}
-
 fn redraw(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> anyhow::Result<()> {
     if event != PromptEvent::Validate {
         return Ok(());
@@ -2259,29 +2207,6 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         },
     },
     TypableCommand {
-        name: "clear-register",
-        aliases: &[],
-        doc: "Clear given register. If no argument is provided, clear all registers.",
-        fun: clear_register,
-        completer: CommandCompleter::all(completers::register),
-        signature: Signature {
-            positionals: (0, Some(1)),
-            ..Signature::DEFAULT
-        },
-    },
-    TypableCommand {
-        name: "set-register",
-        aliases: &[],
-        doc: "Set contents of the given register.",
-        fun: set_register,
-        completer: CommandCompleter::positional(&[completers::register, completers::none]),
-        signature: Signature {
-            positionals: (2, Some(2)),
-            raw_after: Some(1),
-            ..Signature::DEFAULT
-        },
-    },
-    TypableCommand {
         name: "redraw",
         aliases: &[],
         doc: "Clear and re-render the whole UI",
@@ -2297,7 +2222,7 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         aliases: &[],
         doc: "Yank diagnostic(s) under primary cursor to register, or clipboard by default",
         fun: yank_diagnostic,
-        completer: CommandCompleter::all(completers::register),
+        completer: CommandCompleter::none(),
         signature: Signature {
             positionals: (0, Some(1)),
             ..Signature::DEFAULT

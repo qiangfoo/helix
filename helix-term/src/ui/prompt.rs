@@ -724,26 +724,6 @@ impl Component for Prompt {
                 (self.callback_fn)(cx, &self.line, PromptEvent::Update)
             }
             ctrl!('q') => self.exit_selection(),
-            ctrl!('r') => {
-                self.completion = cx
-                    .editor
-                    .registers
-                    .iter_preview()
-                    .map(|(ch, preview)| (0.., format!("{} {}", ch, &preview).into()))
-                    .collect();
-                self.next_char_handler = Some(Box::new(|prompt, c, context| {
-                    prompt.insert_str(
-                        &context
-                            .editor
-                            .registers
-                            .first(c, context.editor)
-                            .unwrap_or_default(),
-                        context.editor,
-                    );
-                }));
-                (self.callback_fn)(cx, &self.line, PromptEvent::Update);
-                return EventResult::Consumed(None);
-            }
             // any char event that's not mapped to any other combo
             KeyEvent {
                 code: KeyCode::Char(c),

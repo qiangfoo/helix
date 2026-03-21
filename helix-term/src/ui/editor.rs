@@ -966,17 +966,12 @@ impl EditorView {
                 // if this fails, count was Some(0)
                 // debug_assert!(cxt.count != 0);
 
-                // set the register
-                cxt.register = cxt.editor.selected_register.take();
-
                 let res = self.handle_keymap_event(mode, cxt, event);
                 if matches!(&res, Some(KeymapResult::NotFound)) {
                     self.on_next_key(OnKeyCallbackKind::Fallback, cxt, event);
                 }
                 if self.keymaps.pending().is_empty() {
                     cxt.editor.count = None
-                } else {
-                    cxt.editor.selected_register = cxt.register.take();
                 }
             }
         }
@@ -1157,7 +1152,7 @@ impl EditorView {
                 if should_yank {
                     commands::yank_main_selection_to_register(
                         cxt.editor,
-                        config.mouse_yank_register,
+                        '*',
                     );
                     EventResult::Consumed(None)
                 } else {
@@ -1211,7 +1206,6 @@ impl Component for EditorView {
         let mut cx = commands::Context {
             editor: context.editor,
             count: None,
-            register: None,
             callback: Vec::new(),
             on_next_key_callback: None,
             jobs: context.jobs,

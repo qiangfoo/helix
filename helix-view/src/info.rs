@@ -1,4 +1,3 @@
-use crate::register::Registers;
 use helix_core::unicode::width::UnicodeWidthStr;
 use std::{borrow::Cow, fmt::Write};
 
@@ -57,14 +56,4 @@ impl Info {
         }
     }
 
-    pub fn from_registers(title: impl Into<Cow<'static, str>>, registers: &Registers) -> Self {
-        let body: Vec<_> = registers
-            .iter_preview()
-            .map(|(ch, preview)| (ch.to_string(), preview))
-            .collect();
-
-        let mut infobox = Self::new(title, &body);
-        infobox.width = 30; // copied content could be very long
-        infobox
-    }
 }

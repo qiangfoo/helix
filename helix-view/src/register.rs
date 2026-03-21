@@ -5,7 +5,7 @@ use arc_swap::access::DynAccess;
 use helix_core::NATIVE_LINE_ENDING;
 
 use crate::{
-    clipboard::{ClipboardError, ClipboardProvider, ClipboardType},
+    clipboard::{ClipboardProvider, ClipboardType},
     Editor,
 };
 
@@ -61,16 +61,7 @@ impl Registers {
                 let path = doc!(editor).display_name();
                 Some(RegisterValues::new(iter::once(path)))
             }
-            '*' | '+' => Some(read_from_clipboard(
-                &self.clipboard_provider.load(),
-                self.inner.get(&name),
-                match name {
-                    '+' => ClipboardType::Clipboard,
-                    '*' => ClipboardType::Selection,
-                    _ => unreachable!(),
-                },
-            )),
-            _ => self
+            '*' | '+' | _ => self
                 .inner
                 .get(&name)
                 .map(|values| RegisterValues::new(values.iter().map(Cow::from).rev())),
@@ -102,36 +93,22 @@ impl Registers {
         }
     }
 
-    pub fn push(&mut self, name: char, mut value: String) -> Result<()> {
+    pub fn push(&mut self, name: char, value: String) -> Result<()> {
         match name {
             '_' => Ok(()),
             '#' | '.' | '%' => Err(anyhow::anyhow!("Register {name} does not support pushing")),
             '*' | '+' => {
-                let clipboard_type = match name {
-                    '+' => ClipboardType::Clipboard,
-                    '*' => ClipboardType::Selection,
-                    _ => unreachable!(),
-                };
-                let contents = self
-                    .clipboard_provider
-                    .load()
-                    .get_contents(&clipboard_type)?;
-                let saved_values = self.inner.entry(name).or_default();
-
-                if !contents_are_saved(saved_values, &contents) {
-                    anyhow::bail!("Failed to push to register {name}: clipboard does not match register contents");
-                }
-
-                saved_values.push(value.clone());
-                if !contents.is_empty() {
-                    value.push_str(NATIVE_LINE_ENDING.as_str());
-                }
-                value.push_str(&contents);
-                self.clipboard_provider
-                    .load()
-                    .set_contents(&value, clipboard_type)?;
-
-                Ok(())
+                // Collect existing values plus the new one, then delegate to write
+                let mut values: Vec<String> = self
+                    .inner
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                values.push(value);
+                self.write(name, values)
             }
             _ => {
                 self.inner.entry(name).or_default().push(value);
@@ -149,135 +126,20 @@ impl Registers {
             .and_then(|mut values| values.next_back())
     }
 
-    pub fn iter_preview(&self) -> impl Iterator<Item = (char, &str)> {
-        self.inner
-            .iter()
-            .filter(|(name, _)| !matches!(name, '*' | '+'))
-            .map(|(name, values)| {
-                let preview = values
-                    .last()
-                    .and_then(|s| s.lines().next())
-                    .unwrap_or("<empty>");
-
-                (*name, preview)
-            })
-            .chain(
-                [
-                    ('_', "<empty>"),
-                    ('#', "<selection indices>"),
-                    ('.', "<selection contents>"),
-                    ('%', "<document path>"),
-                    ('+', "<system clipboard>"),
-                    ('*', "<primary clipboard>"),
-                ]
-                .iter()
-                .copied(),
-            )
-    }
-
     pub fn clear(&mut self) {
-        self.clear_clipboard(ClipboardType::Clipboard);
-        self.clear_clipboard(ClipboardType::Selection);
         self.inner.clear()
     }
 
     pub fn remove(&mut self, name: char) -> bool {
         match name {
-            '*' | '+' => {
-                self.clear_clipboard(match name {
-                    '+' => ClipboardType::Clipboard,
-                    '*' => ClipboardType::Selection,
-                    _ => unreachable!(),
-                });
-                self.inner.remove(&name);
-
-                true
-            }
             '_' | '#' | '.' | '%' => false,
             _ => self.inner.remove(&name).is_some(),
-        }
-    }
-
-    fn clear_clipboard(&mut self, clipboard_type: ClipboardType) {
-        if let Err(err) = self
-            .clipboard_provider
-            .load()
-            .set_contents("", clipboard_type)
-        {
-            log::error!(
-                "Failed to clear {} clipboard: {err}",
-                match clipboard_type {
-                    ClipboardType::Clipboard => "system",
-                    ClipboardType::Selection => "primary",
-                }
-            )
         }
     }
 
     pub fn clipboard_provider_name(&self) -> String {
         self.clipboard_provider.load().name().into_owned()
     }
-}
-
-fn read_from_clipboard<'a>(
-    provider: &ClipboardProvider,
-    saved_values: Option<&'a Vec<String>>,
-    clipboard_type: ClipboardType,
-) -> RegisterValues<'a> {
-    match provider.get_contents(&clipboard_type) {
-        Ok(contents) => {
-            // If we're pasting the same values that we just yanked, re-use
-            // the saved values. This allows pasting multiple selections
-            // even when yanked to a clipboard.
-            let Some(values) = saved_values else {
-                return RegisterValues::new(iter::once(contents.into()));
-            };
-
-            if contents_are_saved(values, &contents) {
-                RegisterValues::new(values.iter().map(Cow::from).rev())
-            } else {
-                RegisterValues::new(iter::once(contents.into()))
-            }
-        }
-        Err(ClipboardError::ReadingNotSupported) => match saved_values {
-            Some(values) => RegisterValues::new(values.iter().map(Cow::from).rev()),
-            None => RegisterValues::new(iter::empty()),
-        },
-        Err(err) => {
-            log::error!(
-                "Failed to read {} clipboard: {err}",
-                match clipboard_type {
-                    ClipboardType::Clipboard => "system",
-                    ClipboardType::Selection => "primary",
-                }
-            );
-
-            RegisterValues::new(iter::empty())
-        }
-    }
-}
-
-fn contents_are_saved(saved_values: &[String], mut contents: &str) -> bool {
-    let line_ending = NATIVE_LINE_ENDING.as_str();
-    let mut values = saved_values.iter().rev();
-
-    match values.next() {
-        Some(first) if contents.starts_with(first) => {
-            contents = &contents[first.len()..];
-        }
-        None if contents.is_empty() => return true,
-        _ => return false,
-    }
-
-    for value in values {
-        if contents.starts_with(line_ending) && contents[line_ending.len()..].starts_with(value) {
-            contents = &contents[line_ending.len() + value.len()..];
-        } else {
-            return false;
-        }
-    }
-
-    true
 }
 
 // This is a wrapper of an iterator that is both double ended and exact size,

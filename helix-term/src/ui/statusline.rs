@@ -540,13 +540,10 @@ where
     write(context, head.into());
 }
 
-fn render_register<'a, F>(context: &mut RenderContext<'a>, write: F)
+fn render_register<'a, F>(_context: &mut RenderContext<'a>, _write: F)
 where
     F: Fn(&mut RenderContext<'a>, Span<'a>) + Copy,
 {
-    if let Some(reg) = context.editor.selected_register {
-        write(context, format!(" reg={} ", reg).into())
-    }
 }
 
 fn render_file_indent_style<'a, F>(context: &mut RenderContext<'a>, write: F)

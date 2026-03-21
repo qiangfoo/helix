@@ -249,7 +249,7 @@ pub fn syntax_workspace_symbol_picker(cx: &mut Context) {
         search_root,
         syntax_cache: DashMap::default(),
     };
-    let reg = cx.register.unwrap_or('/');
+    let reg = '/';
     cx.editor.registers.last_search_register = reg;
     let columns = vec![
         PickerColumn::new("kind", |tag: &Tag, _| tag.kind.as_str().into()),

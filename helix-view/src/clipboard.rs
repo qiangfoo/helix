@@ -14,8 +14,6 @@ pub enum ClipboardType {
 pub enum ClipboardError {
     #[error(transparent)]
     IoError(#[from] std::io::Error),
-    #[error("could not convert terminal output to UTF-8: {0}")]
-    FromUtf8Error(#[from] std::string::FromUtf8Error),
     #[cfg(windows)]
     #[error("Windows API error: {0}")]
     WinAPI(#[from] clipboard_win::ErrorCode),
@@ -23,10 +21,6 @@ pub enum ClipboardError {
     CommandFailed,
     #[error("failed to write to clipboard provider's stdin")]
     StdinWriteFailed,
-    #[error("clipboard provider did not return any contents")]
-    MissingStdout,
-    #[error("This clipboard provider does not support reading")]
-    ReadingNotSupported,
 }
 
 type Result<T> = std::result::Result<T, ClipboardError>;
@@ -53,10 +47,6 @@ mod noop {
             "none".into()
         }
 
-        pub fn get_contents(&self, _clipboard_type: ClipboardType) -> Result<String> {
-            Err(ClipboardError::ReadingNotSupported)
-        }
-
         pub fn set_contents(&self, _content: &str, _clipboard_type: ClipboardType) -> Result<()> {
             Ok(())
         }
@@ -77,9 +67,7 @@ mod external {
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
     #[serde(rename_all = "kebab-case")]
     pub struct CommandProvider {
-        yank: Command,
         paste: Command,
-        yank_primary: Option<Command>,
         paste_primary: Option<Command>,
     }
 
@@ -120,7 +108,7 @@ mod external {
 
             if env_var_is_set("TMUX") && binary_exists("tmux") {
                 Self::Tmux
-            } else if binary_exists("pbcopy") && binary_exists("pbpaste") {
+            } else if binary_exists("pbcopy") {
                 Self::Pasteboard
             } else {
                 #[cfg(feature = "term")]
@@ -134,30 +122,13 @@ mod external {
         fn default() -> Self {
             use helix_stdx::env::{binary_exists, env_var_is_set};
 
-            fn is_exit_success(program: &str, args: &[&str]) -> bool {
-                std::process::Command::new(program)
-                    .args(args)
-                    .output()
-                    .ok()
-                    .and_then(|out| out.status.success().then_some(()))
-                    .is_some()
-            }
-
-            if env_var_is_set("WAYLAND_DISPLAY")
-                && binary_exists("wl-copy")
-                && binary_exists("wl-paste")
-            {
+            if env_var_is_set("WAYLAND_DISPLAY") && binary_exists("wl-copy") {
                 Self::Wayland
             } else if env_var_is_set("DISPLAY") && binary_exists("xclip") {
                 Self::XClip
-            } else if env_var_is_set("DISPLAY")
-                && binary_exists("xsel")
-                // FIXME: check performance of is_exit_success
-                && is_exit_success("xsel", &["-o", "-b"])
-            {
+            } else if env_var_is_set("DISPLAY") && binary_exists("xsel") {
                 Self::XSel
-            } else if binary_exists("termux-clipboard-set") && binary_exists("termux-clipboard-get")
-            {
+            } else if binary_exists("termux-clipboard-set") {
                 Self::Termux
             } else if env_var_is_set("TMUX") && binary_exists("tmux") {
                 Self::Tmux
@@ -177,14 +148,7 @@ mod external {
                 name: &'static str,
                 provider: &'static CommandProvider,
             ) -> Cow<'a, str> {
-                if provider.yank.command != provider.paste.command {
-                    Cow::Owned(format!(
-                        "{} ({}+{})",
-                        name, provider.yank.command, provider.paste.command
-                    ))
-                } else {
-                    Cow::Owned(format!("{} ({})", name, provider.yank.command))
-                }
+                Cow::Owned(format!("{} ({})", name, provider.paste.command))
             }
 
             match self {
@@ -201,56 +165,10 @@ mod external {
                 #[cfg(feature = "term")]
                 Self::Termcode => "termcode".into(),
                 Self::Custom(command_provider) => Cow::Owned(format!(
-                    "custom ({}+{})",
-                    command_provider.yank.command, command_provider.paste.command
+                    "custom ({})",
+                    command_provider.paste.command
                 )),
                 Self::None => "none".into(),
-            }
-        }
-
-        pub fn get_contents(&self, clipboard_type: &ClipboardType) -> Result<String> {
-            fn yank_from_builtin(
-                provider: CommandProvider,
-                clipboard_type: &ClipboardType,
-            ) -> Result<String> {
-                match clipboard_type {
-                    ClipboardType::Clipboard => execute_command(&provider.yank, None, true)?
-                        .ok_or(ClipboardError::MissingStdout),
-                    ClipboardType::Selection => {
-                        if let Some(cmd) = provider.yank_primary.as_ref() {
-                            return execute_command(cmd, None, true)?
-                                .ok_or(ClipboardError::MissingStdout);
-                        }
-
-                        Ok(String::new())
-                    }
-                }
-            }
-
-            match self {
-                Self::Pasteboard => yank_from_builtin(PASTEBOARD, clipboard_type),
-                Self::Wayland => yank_from_builtin(WL_CLIPBOARD, clipboard_type),
-                Self::XClip => yank_from_builtin(XCLIP, clipboard_type),
-                Self::XSel => yank_from_builtin(XSEL, clipboard_type),
-                Self::Win32Yank => yank_from_builtin(WIN32, clipboard_type),
-                Self::Tmux => yank_from_builtin(TMUX, clipboard_type),
-                Self::Termux => yank_from_builtin(TERMUX, clipboard_type),
-                #[cfg(target_os = "windows")]
-                Self::Windows => match clipboard_type {
-                    ClipboardType::Clipboard => {
-                        let contents =
-                            clipboard_win::get_clipboard(clipboard_win::formats::Unicode)?;
-                        Ok(contents)
-                    }
-                    ClipboardType::Selection => Ok(String::new()),
-                },
-                #[cfg(feature = "term")]
-                Self::Termcode => Err(ClipboardError::ReadingNotSupported),
-                Self::Custom(command_provider) => {
-                    execute_command(&command_provider.yank, None, true)?
-                        .ok_or(ClipboardError::MissingStdout)
-                }
-                Self::None => Err(ClipboardError::ReadingNotSupported),
             }
         }
 
@@ -271,7 +189,7 @@ mod external {
                     }
                 };
 
-                execute_command(cmd, Some(content), false).map(|_| ())
+                execute_command(cmd, Some(content))
             }
 
             match self {
@@ -307,11 +225,11 @@ mod external {
                 }
                 Self::Custom(command_provider) => match clipboard_type {
                     ClipboardType::Clipboard => {
-                        execute_command(&command_provider.paste, Some(content), false).map(|_| ())
+                        execute_command(&command_provider.paste, Some(content))
                     }
                     ClipboardType::Selection => {
                         if let Some(cmd) = &command_provider.paste_primary {
-                            execute_command(cmd, Some(content), false).map(|_| ())
+                            execute_command(cmd, Some(content))
                         } else {
                             Ok(())
                         }
@@ -324,39 +242,23 @@ mod external {
 
     macro_rules! command_provider {
         ($name:ident,
-         yank => $yank_cmd:literal $( , $yank_arg:literal )* ;
          paste => $paste_cmd:literal $( , $paste_arg:literal )* ; ) => {
             const $name: CommandProvider = CommandProvider {
-                yank: Command {
-                    command: Cow::Borrowed($yank_cmd),
-                    args: Cow::Borrowed(&[ $( Cow::Borrowed($yank_arg) ),* ])
-                },
                 paste: Command {
                     command: Cow::Borrowed($paste_cmd),
                     args: Cow::Borrowed(&[ $( Cow::Borrowed($paste_arg) ),* ])
                 },
-                yank_primary: None,
                 paste_primary: None,
             };
         };
         ($name:ident,
-         yank => $yank_cmd:literal $( , $yank_arg:literal )* ;
          paste => $paste_cmd:literal $( , $paste_arg:literal )* ;
-         yank_primary => $yank_primary_cmd:literal $( , $yank_primary_arg:literal )* ;
          paste_primary => $paste_primary_cmd:literal $( , $paste_primary_arg:literal )* ; ) => {
             const $name: CommandProvider = CommandProvider {
-                yank: Command {
-                    command: Cow::Borrowed($yank_cmd),
-                    args: Cow::Borrowed(&[ $( Cow::Borrowed($yank_arg) ),* ])
-                },
                 paste: Command {
                     command: Cow::Borrowed($paste_cmd),
                     args: Cow::Borrowed(&[ $( Cow::Borrowed($paste_arg) ),* ])
                 },
-                yank_primary: Some(Command {
-                    command: Cow::Borrowed($yank_primary_cmd),
-                    args: Cow::Borrowed(&[ $( Cow::Borrowed($yank_primary_arg) ),* ])
-                }),
                 paste_primary: Some(Command {
                     command: Cow::Borrowed($paste_primary_cmd),
                     args: Cow::Borrowed(&[ $( Cow::Borrowed($paste_primary_arg) ),* ])
@@ -367,56 +269,41 @@ mod external {
 
     command_provider! {
         TMUX,
-        yank => "tmux", "save-buffer", "-";
         paste => "tmux", "load-buffer", "-w", "-";
     }
     command_provider! {
         PASTEBOARD,
-        yank => "pbpaste";
         paste => "pbcopy";
     }
     command_provider! {
         WL_CLIPBOARD,
-        yank => "wl-paste", "--no-newline";
         paste => "wl-copy", "--type", "text/plain";
-        yank_primary => "wl-paste", "-p", "--no-newline";
         paste_primary => "wl-copy", "-p", "--type", "text/plain";
     }
     command_provider! {
         XCLIP,
-        yank => "xclip", "-o", "-selection", "clipboard";
         paste => "xclip", "-i", "-selection", "clipboard";
-        yank_primary => "xclip", "-o";
         paste_primary => "xclip", "-i";
     }
     command_provider! {
         XSEL,
-        yank => "xsel", "-o", "-b";
         paste => "xsel", "-i", "-b";
-        yank_primary => "xsel", "-o";
         paste_primary => "xsel", "-i";
     }
     command_provider! {
         WIN32,
-        yank => "win32yank.exe", "-o", "--lf";
         paste => "win32yank.exe", "-i", "--crlf";
     }
     command_provider! {
         TERMUX,
-        yank => "termux-clipboard-get";
         paste => "termux-clipboard-set";
     }
 
-    fn execute_command(
-        cmd: &Command,
-        input: Option<&str>,
-        pipe_output: bool,
-    ) -> Result<Option<String>> {
+    fn execute_command(cmd: &Command, input: Option<&str>) -> Result<()> {
         use std::io::Write;
         use std::process::{Command, Stdio};
 
         let stdin = input.map(|_| Stdio::piped()).unwrap_or_else(Stdio::null);
-        let stdout = pipe_output.then(Stdio::piped).unwrap_or_else(Stdio::null);
 
         let mut command: Command = Command::new(cmd.command.as_ref());
 
@@ -424,7 +311,7 @@ mod external {
         let mut command_mut: &mut Command = command
             .args(cmd.args.iter().map(AsRef::as_ref))
             .stdin(stdin)
-            .stdout(stdout)
+            .stdout(Stdio::null())
             .stderr(Stdio::null());
 
         // Fix for https://github.com/helix-editor/helix/issues/5424
@@ -461,10 +348,6 @@ mod external {
             return Err(ClipboardError::CommandFailed);
         }
 
-        if pipe_output {
-            Ok(Some(String::from_utf8(output.stdout)?))
-        } else {
-            Ok(None)
-        }
+        Ok(())
     }
 }

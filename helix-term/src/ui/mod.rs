@@ -715,19 +715,6 @@ pub mod completers {
         }
     }
 
-    pub fn register(editor: &Editor, input: &str) -> Vec<Completion> {
-        let iter = editor
-            .registers
-            .iter_preview()
-            // Exclude special registers that shouldn't be written to
-            .filter(|(ch, _)| !matches!(ch, '%' | '#' | '.'))
-            .map(|(ch, _)| ch.to_string());
-
-        fuzzy_match(input, iter, false)
-            .into_iter()
-            .map(|(name, _)| ((0..), name.into()))
-            .collect()
-    }
 
     pub fn program(_editor: &Editor, input: &str) -> Vec<Completion> {
         static PROGRAMS_IN_PATH: Lazy<BTreeSet<String>> = Lazy::new(|| {

@@ -246,7 +246,6 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "N" => search_prev,
         },
 
-        "\"" => select_register,
         "C-z" => suspend,
     });
     let mut select = normal.clone();
