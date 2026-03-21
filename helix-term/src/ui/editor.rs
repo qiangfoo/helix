@@ -1179,36 +1179,7 @@ impl EditorView {
             }
 
             MouseEventKind::Up(MouseButton::Middle) => {
-                let editor = &mut cxt.editor;
-                if !config.middle_click_paste {
-                    return EventResult::Ignored(None);
-                }
-
-                if modifiers == KeyModifiers::ALT {
-                    commands::replace_selections_with_register(
-                        cxt.editor,
-                        config.mouse_yank_register,
-                        cxt.count(),
-                    );
-
-                    return EventResult::Consumed(None);
-                }
-
-                if let Some((pos, view_id)) = pos_and_view(editor, row, column, true) {
-                    let doc = doc_mut!(editor, &view!(editor, view_id).doc);
-                    doc.set_selection(view_id, Selection::point(pos));
-                    cxt.editor.focus(view_id);
-
-                    commands::paste(
-                        cxt.editor,
-                        config.mouse_yank_register,
-                        commands::Paste::Before,
-                        cxt.count(),
-                    );
-
-                    return EventResult::Consumed(None);
-                }
-
+                // Paste is disabled in read-only viewer
                 EventResult::Ignored(None)
             }
 
@@ -1251,23 +1222,8 @@ impl Component for EditorView {
         };
 
         match event {
-            Event::Paste(contents) => {
-                self.handle_non_key_input(&mut cx);
-                cx.count = cx.editor.count;
-                commands::paste_bracketed_value(&mut cx, contents.clone());
-                cx.editor.count = None;
-
-                let config = cx.editor.config();
-                let mode = cx.editor.mode();
-                let (view, doc) = current!(cx.editor);
-                view.ensure_cursor_in_view(doc, config.scrolloff);
-
-                // Store a history state if not in insert mode. Otherwise wait till we exit insert
-                // to include any edits to the paste in the history state.
-                if mode != Mode::Normal {
-                    doc.append_changes_to_history(view);
-                }
-
+            Event::Paste(_contents) => {
+                // Paste is disabled in read-only viewer
                 EventResult::Consumed(None)
             }
             Event::Resize(_width, _height) => {
