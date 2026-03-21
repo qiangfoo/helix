@@ -11,7 +11,6 @@ pub mod editor_config;
 pub mod fuzzy;
 pub mod graphemes;
 pub mod history;
-pub mod increment;
 pub mod indent;
 pub mod line_ending;
 pub mod macros;
