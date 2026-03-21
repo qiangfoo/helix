@@ -3084,55 +3084,6 @@ fn last_picker(cx: &mut Context) {
 //
 // TODO: provide some way to cancel this, probably as part of a more general job cancellation
 // scheme
-async fn make_format_callback(
-    doc_id: DocumentId,
-    doc_version: i32,
-    view_id: ViewId,
-    format: impl Future<Output = Result<Transaction, FormatterError>> + Send + 'static,
-    write: Option<(Option<PathBuf>, bool)>,
-) -> anyhow::Result<job::Callback> {
-    let format = format.await;
-
-    let call: job::Callback = Callback::Editor(Box::new(move |editor| {
-        if !editor.documents.contains_key(&doc_id) || !editor.tree.contains(view_id) {
-            return;
-        }
-
-        let scrolloff = editor.config().scrolloff;
-        let doc = doc_mut!(editor, &doc_id);
-        let view = view_mut!(editor, view_id);
-
-        match format {
-            Ok(format) => {
-                if doc.version() == doc_version {
-                    doc.apply(&format, view.id);
-                    doc.append_changes_to_history(view);
-                    doc.detect_indent_and_line_ending();
-                    view.ensure_cursor_in_view(doc, scrolloff);
-                } else {
-                    log::info!("discarded formatting changes because the document changed");
-                }
-            }
-            Err(err) => {
-                if write.is_none() {
-                    editor.set_error(err.to_string());
-                    return;
-                }
-                log::info!("failed to format '{}': {err}", doc.display_name());
-            }
-        }
-
-        if let Some((path, force)) = write {
-            let id = doc.id();
-            if let Err(err) = editor.save(id, path, force) {
-                editor.set_error(format!("Error saving: {}", err));
-            }
-        }
-    }));
-
-    Ok(call)
-}
-
 #[derive(PartialEq, Eq)]
 pub enum Open {
     Below,
