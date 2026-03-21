@@ -1139,10 +1139,6 @@ impl EditorView {
             }
 
             MouseEventKind::Up(MouseButton::Left) => {
-                if !config.middle_click_paste {
-                    return EventResult::Ignored(None);
-                }
-
                 let (view, doc) = current!(cxt.editor);
 
                 let should_yank = match cxt.editor.mouse_down_range.take() {

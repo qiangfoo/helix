@@ -420,7 +420,7 @@ pub fn write_all_impl(
         // Save an undo checkpoint for any outstanding changes.
         doc.append_changes_to_history(view);
 
-        let fmt = if options.auto_format && config.auto_format {
+        let fmt = if options.auto_format && false {
             let doc = doc!(cx.editor, &doc_id);
             doc.auto_format(cx.editor).map(|fmt| {
                 let callback = make_format_callback(
@@ -551,7 +551,7 @@ fn yank_joined(cx: &mut compositor::Context, args: Args, event: PromptEvent) -> 
     let register = cx
         .editor
         .selected_register
-        .unwrap_or(cx.editor.config().default_yank_register);
+        .unwrap_or('"');
     yank_joined_impl(cx.editor, separator, register);
     Ok(())
 }

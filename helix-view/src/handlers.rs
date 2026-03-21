@@ -17,13 +17,11 @@ pub enum FileWatcherCommand {
 
 pub mod diagnostics;
 pub mod lsp;
-pub mod word_index;
 
 pub struct Handlers {
     pub signature_hints: Sender<lsp::SignatureHelpEvent>,
     pub document_colors: Sender<lsp::DocumentColorsEvent>,
     pub document_links: Sender<lsp::DocumentLinksEvent>,
-    pub word_index: word_index::Handler,
     pub pull_diagnostics: Sender<lsp::PullDiagnosticsEvent>,
     pub pull_all_documents_diagnostics: Sender<lsp::PullAllDocumentsDiagnosticsEvent>,
     pub file_watcher: Sender<FileWatcherCommand>,
@@ -42,13 +40,8 @@ impl Handlers {
         };
         send_blocking(&self.signature_hints, event)
     }
-
-    pub fn word_index(&self) -> &word_index::WordIndex {
-        &self.word_index.index
-    }
 }
 
 pub fn register_hooks(handlers: &Handlers) {
     lsp::register_hooks(handlers);
-    word_index::register_hooks(handlers);
 }

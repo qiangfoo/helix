@@ -308,22 +308,6 @@ pub struct Config {
     pub cursorcolumn: bool,
     #[serde(deserialize_with = "deserialize_gutter_seq_or_struct")]
     pub gutters: GutterConfig,
-    /// Middle click paste support. Defaults to true.
-    pub middle_click_paste: bool,
-    /// Automatic auto-completion, automatically pop up without user trigger. Defaults to true.
-    pub auto_completion: bool,
-    /// Enable filepath completion.
-    /// Show files and directories if an existing path at the cursor was recognized,
-    /// either absolute or relative to the current opened document or current working directory (if the buffer is not yet saved).
-    /// Defaults to true.
-    pub path_completion: bool,
-    /// Configures completion of words from open buffers.
-    /// Defaults to enabled with a trigger length of 7.
-    pub word_completion: WordCompletion,
-    /// Automatic formatting on save. Defaults to true.
-    pub auto_format: bool,
-    /// Default register used for yank/paste. Defaults to '"'
-    pub default_yank_register: char,
     /// Automatically reload buffers when the underlying file changes on disk. Defaults to true.
     pub auto_reload: bool,
     /// Set a global text_width
@@ -335,22 +319,6 @@ pub struct Config {
         deserialize_with = "deserialize_duration_millis"
     )]
     pub idle_timeout: Duration,
-    /// Time in milliseconds after typing a word character before auto completions
-    /// are shown, set to 5 for instant. Defaults to 250ms.
-    #[serde(
-        serialize_with = "serialize_duration_millis",
-        deserialize_with = "deserialize_duration_millis"
-    )]
-    pub completion_timeout: Duration,
-    /// Whether to insert the completion suggestion on hover. Defaults to true.
-    pub preview_completion_insert: bool,
-    pub completion_trigger_len: u8,
-    /// Whether to instruct the LSP to replace the entire word when applying a completion
-    /// or to only insert new text
-    pub completion_replace: bool,
-    /// `true` if helix should automatically add a line comment token if you're currently in a comment
-    /// and press `enter`.
-    pub continue_comments: bool,
     /// Whether to display infoboxes. Defaults to true.
     pub auto_info: bool,
     pub file_picker: FilePickerConfig,
@@ -1005,21 +973,6 @@ pub enum PopupBorderConfig {
     Menu,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
-pub struct WordCompletion {
-    pub enable: bool,
-    pub trigger_length: NonZeroU8,
-}
-
-impl Default for WordCompletion {
-    fn default() -> Self {
-        Self {
-            enable: true,
-            trigger_length: NonZeroU8::new(7).unwrap(),
-        }
-    }
-}
 
 impl Default for Config {
     fn default() -> Self {
@@ -1037,17 +990,8 @@ impl Default for Config {
             cursorline: false,
             cursorcolumn: false,
             gutters: GutterConfig::default(),
-            middle_click_paste: true,
-            auto_completion: true,
-            path_completion: true,
-            word_completion: WordCompletion::default(),
-            auto_format: true,
-            default_yank_register: '"',
             auto_reload: true,
             idle_timeout: Duration::from_millis(250),
-            completion_timeout: Duration::from_millis(250),
-            preview_completion_insert: true,
-            completion_trigger_len: 2,
             auto_info: true,
             file_picker: FilePickerConfig::default(),
             file_explorer: FileExplorerConfig::default(),
@@ -1068,8 +1012,6 @@ impl Default for Config {
                 ..SoftWrap::default()
             },
             text_width: 80,
-            completion_replace: false,
-            continue_comments: true,
             workspace_lsp_roots: Vec::new(),
             default_line_ending: LineEndingConfig::default(),
             insert_final_newline: true,

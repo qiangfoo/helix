@@ -243,21 +243,6 @@ impl<T: Item + 'static> Component for Menu<T> {
             compositor.pop();
         }));
 
-        // Ignore tab key when supertab is turned on in order not to interfere
-        // with it. (Is there a better way to do this?)
-        if (event == key!(Tab) || event == shift!(Tab))
-            && cx.editor.config().auto_completion
-            && matches!(
-                cx.editor.config().smart_tab,
-                Some(SmartTabConfig {
-                    enable: true,
-                    supersede_menu: true,
-                })
-            )
-        {
-            return EventResult::Ignored(None);
-        }
-
         match event {
             // esc or ctrl-c aborts the completion and closes the menu
             key!(Esc) | ctrl!('c') => {

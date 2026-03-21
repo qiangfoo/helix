@@ -9,7 +9,7 @@ use crate::events;
 use crate::handlers::diagnostics::PullDiagnosticsHandler;
 use crate::handlers::signature_help::SignatureHelpHandler;
 
-pub use helix_view::handlers::{word_index, Handlers};
+pub use helix_view::handlers::Handlers;
 
 use self::document_colors::DocumentColorsHandler;
 use self::document_links::DocumentLinksHandler;
@@ -27,7 +27,6 @@ pub fn setup(_config: Arc<ArcSwap<Config>>) -> Handlers {
     let signature_hints = SignatureHelpHandler::new().spawn();
     let document_colors = DocumentColorsHandler::default().spawn();
     let document_links = DocumentLinksHandler::default().spawn();
-    let word_index = word_index::Handler::spawn();
     let pull_diagnostics = PullDiagnosticsHandler::default().spawn();
     let pull_all_documents_diagnostics = PullAllDocumentsDiagnosticHandler::default().spawn();
     let file_watcher = file_watcher::spawn();
@@ -36,7 +35,6 @@ pub fn setup(_config: Arc<ArcSwap<Config>>) -> Handlers {
         signature_hints,
         document_colors,
         document_links,
-        word_index,
         pull_diagnostics,
         pull_all_documents_diagnostics,
         file_watcher,
