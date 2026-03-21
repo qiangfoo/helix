@@ -24,7 +24,6 @@ use helix_core::{
     doc_formatter::TextFormat,
     encoding, find_workspace,
     graphemes::{self, next_grapheme_boundary},
-    history::UndoKind,
     indent::{self, IndentStyle},
     line_ending::{get_line_ending_of_str, line_end_char_index},
     match_brackets,
@@ -434,7 +433,6 @@ impl MappableCommand {
         goto_window_bottom, "Goto window bottom",
         goto_last_accessed_file, "Goto last accessed file",
         goto_last_modified_file, "Goto last modified file",
-        goto_last_modification, "Goto last modification",
         goto_line, "Goto line",
         goto_last_line, "Goto last line",
         extend_to_last_line, "Extend to last line",
@@ -460,11 +458,6 @@ impl MappableCommand {
         extend_to_line_end, "Extend to line end",
         extend_to_line_end_newline, "Extend to line end",
         signature_help, "Show signature help",
-        undo, "Undo change",
-        redo, "Redo change",
-        earlier, "Move backward in history",
-        later, "Move forward in history",
-        commit_undo_checkpoint, "Commit changes to new checkpoint",
         yank, "Yank selection",
         yank_to_clipboard, "Yank selections to clipboard",
         yank_to_primary_clipboard, "Yank selections to primary clipboard",
@@ -3568,20 +3561,6 @@ fn goto_last_accessed_file(cx: &mut Context) {
     }
 }
 
-fn goto_last_modification(cx: &mut Context) {
-    let (view, doc) = current!(cx.editor);
-    let pos = doc.history.get_mut().last_edit_pos();
-    let text = doc.text().slice(..);
-    if let Some(pos) = pos {
-        let selection = doc
-            .selection(view.id)
-            .clone()
-            .transform(|range| range.put_cursor(text, pos, cx.editor.mode == Mode::Select));
-        push_jump(view, doc);
-        doc.set_selection(view.id, selection);
-    }
-}
-
 fn goto_last_modified_file(cx: &mut Context) {
     let view = view!(cx.editor);
     let alternate_file = view
@@ -3803,57 +3782,6 @@ fn hunk_range(hunk: Hunk, text: RopeSlice) -> Range {
 }
 
 // Undo / Redo
-
-fn undo(cx: &mut Context) {
-    let count = cx.count();
-    let (view, doc) = current!(cx.editor);
-    for _ in 0..count {
-        if !doc.undo(view) {
-            cx.editor.set_status("Already at oldest change");
-            break;
-        }
-    }
-}
-
-fn redo(cx: &mut Context) {
-    let count = cx.count();
-    let (view, doc) = current!(cx.editor);
-    for _ in 0..count {
-        if !doc.redo(view) {
-            cx.editor.set_status("Already at newest change");
-            break;
-        }
-    }
-}
-
-fn earlier(cx: &mut Context) {
-    let count = cx.count();
-    let (view, doc) = current!(cx.editor);
-    for _ in 0..count {
-        // rather than doing in batch we do this so get error halfway
-        if !doc.earlier(view, UndoKind::Steps(1)) {
-            cx.editor.set_status("Already at oldest change");
-            break;
-        }
-    }
-}
-
-fn later(cx: &mut Context) {
-    let count = cx.count();
-    let (view, doc) = current!(cx.editor);
-    for _ in 0..count {
-        // rather than doing in batch we do this so get error halfway
-        if !doc.later(view, UndoKind::Steps(1)) {
-            cx.editor.set_status("Already at newest change");
-            break;
-        }
-    }
-}
-
-fn commit_undo_checkpoint(cx: &mut Context) {
-    let (view, doc) = current!(cx.editor);
-    doc.append_changes_to_history(view);
-}
 
 // Yank / Paste
 

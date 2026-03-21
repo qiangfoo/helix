@@ -35,7 +35,7 @@ use std::time::SystemTime;
 use helix_core::{
     editor_config::EditorConfig,
     encoding,
-    history::{History, State, UndoKind},
+    history::{History, State},
     indent::{auto_detect_indent_style, IndentStyle},
     line_ending::auto_detect_line_ending,
     syntax::{self, config::LanguageConfiguration},
@@ -1651,40 +1651,6 @@ impl Document {
         self.apply_inner(transaction, view_id, false)
     }
 
-    fn undo_redo_impl(&mut self, view: &mut View, undo: bool) -> bool {
-        if undo {
-            self.append_changes_to_history(view);
-        } else if !self.changes.is_empty() {
-            return false;
-        }
-        let mut history = self.history.take();
-        let txn = if undo { history.undo() } else { history.redo() };
-        let success = if let Some(txn) = txn {
-            self.apply_impl(txn, view.id, true)
-        } else {
-            false
-        };
-        self.history.set(history);
-
-        if success {
-            // reset changeset to fix len
-            self.changes = ChangeSet::new(self.text().slice(..));
-            // Sync with changes with the jumplist selections.
-            view.sync_changes(self);
-        }
-        success
-    }
-
-    /// Undo the last modification to the [`Document`]. Returns whether the undo was successful.
-    pub fn undo(&mut self, view: &mut View) -> bool {
-        self.undo_redo_impl(view, true)
-    }
-
-    /// Redo the last modification to the [`Document`]. Returns whether the redo was successful.
-    pub fn redo(&mut self, view: &mut View) -> bool {
-        self.undo_redo_impl(view, false)
-    }
-
     /// Creates a reference counted snapshot (called savpepoint) of the document.
     ///
     /// The snapshot will remain valid (and updated) idenfinitly as long as ereferences to it exist.
@@ -1734,42 +1700,6 @@ impl Document {
         self.apply_inner(&revert, view.id, emit_lsp_notification);
         *revert = Transaction::new(self.text()).with_selection(self.selection(view.id).clone());
         self.savepoints.push(savepoint_ref)
-    }
-
-    fn earlier_later_impl(&mut self, view: &mut View, uk: UndoKind, earlier: bool) -> bool {
-        if earlier {
-            self.append_changes_to_history(view);
-        } else if !self.changes.is_empty() {
-            return false;
-        }
-        let txns = if earlier {
-            self.history.get_mut().earlier(uk)
-        } else {
-            self.history.get_mut().later(uk)
-        };
-        let mut success = false;
-        for txn in txns {
-            if self.apply_impl(&txn, view.id, true) {
-                success = true;
-            }
-        }
-        if success {
-            // reset changeset to fix len
-            self.changes = ChangeSet::new(self.text().slice(..));
-            // Sync with changes with the jumplist selections.
-            view.sync_changes(self);
-        }
-        success
-    }
-
-    /// Undo modifications to the [`Document`] according to `uk`.
-    pub fn earlier(&mut self, view: &mut View, uk: UndoKind) -> bool {
-        self.earlier_later_impl(view, uk, true)
-    }
-
-    /// Redo modifications to the [`Document`] according to `uk`.
-    pub fn later(&mut self, view: &mut View, uk: UndoKind) -> bool {
-        self.earlier_later_impl(view, uk, false)
     }
 
     /// Commit pending changes to history
