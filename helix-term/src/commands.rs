@@ -43,7 +43,7 @@ use helix_core::{
     Selection, SmallVec, Syntax, Tendril, Transaction,
 };
 use helix_view::{
-    document::{FormatterError, Mode, SCRATCH_BUFFER_NAME},
+    document::{DiffSource, FormatterError, Mode, SCRATCH_BUFFER_NAME},
     editor::{Action, Motion},
     expansion,
     info::Info,
@@ -3021,7 +3021,6 @@ fn buffer_picker(cx: &mut Context) {
     struct BufferMeta {
         id: DocumentId,
         path: Option<PathBuf>,
-        is_modified: bool,
         is_current: bool,
         focused_at: std::time::Instant,
     }
@@ -3029,7 +3028,6 @@ fn buffer_picker(cx: &mut Context) {
     let new_meta = |doc: &Document| BufferMeta {
         id: doc.id(),
         path: doc.path().cloned(),
-        is_modified: doc.is_modified(),
         is_current: doc.id() == current,
         focused_at: doc.focused_at,
     };
@@ -3048,9 +3046,6 @@ fn buffer_picker(cx: &mut Context) {
         PickerColumn::new("id", |meta: &BufferMeta, _| meta.id.to_string().into()),
         PickerColumn::new("flags", |meta: &BufferMeta, _| {
             let mut flags = String::new();
-            if meta.is_modified {
-                flags.push('+');
-            }
             if meta.is_current {
                 flags.push('*');
             }
@@ -3277,6 +3272,13 @@ fn changed_file_picker(cx: &mut Context) {
                 cx.editor.config.clone(),
                 cx.editor.syn_loader.clone(),
             );
+            doc.diff_source = Some(match item {
+                GitViewItem::LocalChanges { cwd } => DiffSource::LocalChanges { cwd: cwd.clone() },
+                GitViewItem::Commit { info, cwd } => DiffSource::CommitDiff {
+                    cwd: cwd.clone(),
+                    hash: info.hash.clone(),
+                },
+            });
             doc.set_path(Some(std::path::Path::new(&name)));
             let id = cx.editor.new_file_from_document(Action::Replace, doc);
             let loader = cx.editor.syn_loader.load();

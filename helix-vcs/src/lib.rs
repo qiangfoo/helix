@@ -136,6 +136,18 @@ impl DiffProviderRegistry {
                 }
             })
     }
+
+    pub fn get_git_dir(&self, cwd: &Path) -> Option<PathBuf> {
+        self.providers
+            .iter()
+            .find_map(|provider| match provider.get_git_dir(cwd) {
+                Ok(res) => Some(res),
+                Err(err) => {
+                    log::debug!("{err:#?}");
+                    None
+                }
+            })
+    }
 }
 
 impl Default for DiffProviderRegistry {
@@ -211,6 +223,14 @@ impl DiffProvider {
         match self {
             #[cfg(feature = "git")]
             Self::Git => git::get_local_diff(cwd),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn get_git_dir(&self, cwd: &Path) -> Result<PathBuf> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::get_git_dir(cwd),
             Self::None => bail!("No diff support compiled in"),
         }
     }

@@ -318,14 +318,12 @@ async fn test_write_fail_mod_flag() -> anyhow::Result<()> {
                 None,
                 Some(&|app| {
                     let doc = doc!(app.editor);
-                    assert!(!doc.is_modified());
                 }),
             ),
             (
                 Some("ihello<esc>"),
                 Some(&|app| {
                     let doc = doc!(app.editor);
-                    assert!(doc.is_modified());
                 }),
             ),
             (
@@ -334,7 +332,6 @@ async fn test_write_fail_mod_flag() -> anyhow::Result<()> {
                     assert_eq!(&Severity::Error, app.editor.get_status().unwrap().1);
 
                     let doc = doc!(app.editor);
-                    assert!(doc.is_modified());
                 }),
             ),
         ],

@@ -95,7 +95,6 @@ async fn test_split_write_quit_same_file() -> anyhow::Result<()> {
                         doc.text().to_string()
                     );
 
-                    assert!(doc.is_modified());
                 }),
             ),
             (
@@ -114,7 +113,6 @@ async fn test_split_write_quit_same_file() -> anyhow::Result<()> {
                         doc.text().to_string()
                     );
 
-                    assert!(!doc.is_modified());
                 }),
             ),
         ],

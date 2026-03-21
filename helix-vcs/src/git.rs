@@ -141,6 +141,12 @@ fn open_repo(path: &Path) -> Result<ThreadSafeRepository> {
     Ok(res)
 }
 
+/// Returns the path to the `.git` directory for the given working directory.
+pub fn get_git_dir(cwd: &Path) -> Result<PathBuf> {
+    let repo = open_repo(cwd)?.to_thread_local();
+    Ok(repo.git_dir().to_path_buf())
+}
+
 /// Emulates the result of running `git status` from the command line.
 fn status(repo: &Repository, f: impl Fn(Result<FileChange>) -> bool) -> Result<()> {
     let work_dir = repo

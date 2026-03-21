@@ -134,6 +134,15 @@ pub enum DocumentOpenError {
     IoError(#[from] io::Error),
 }
 
+/// Describes how a virtual diff buffer was created, so it can be regenerated.
+#[derive(Debug, Clone)]
+pub enum DiffSource {
+    /// Working directory diff vs HEAD.
+    LocalChanges { cwd: PathBuf },
+    /// A specific commit's diff vs its parent.
+    CommitDiff { cwd: PathBuf, hash: String },
+}
+
 pub struct Document {
     pub(crate) id: DocumentId,
     text: Rope,
@@ -196,6 +205,9 @@ pub struct Document {
     diff_handle: Option<DiffHandle>,
     version_control_head: Option<Arc<ArcSwap<Box<str>>>>,
     worktree_name: Option<String>,
+
+    /// If this document is a git diff buffer, stores how to regenerate it.
+    pub diff_source: Option<DiffSource>,
 
     // when document was used for most-recent-used buffer picker
     pub focused_at: std::time::Instant,
@@ -743,6 +755,7 @@ impl Document {
             config,
             version_control_head: None,
             worktree_name: None,
+            diff_source: None,
             focused_at: std::time::Instant::now(),
             readonly: true,
             jump_labels: HashMap::new(),
@@ -1265,7 +1278,6 @@ impl Document {
         let transaction = helix_core::diff::compare_ropes(self.text(), &rope);
         self.apply(&transaction, view.id);
         self.append_changes_to_history(view);
-        self.reset_modified();
         self.pickup_last_saved_time();
         self.detect_indent_and_line_ending();
 
@@ -1789,26 +1801,6 @@ impl Document {
     }
 
     /// If there are unsaved modifications.
-    pub fn is_modified(&self) -> bool {
-        let history = self.history.take();
-        let current_revision = history.current_revision();
-        self.history.set(history);
-        log::debug!(
-            "id {} modified - last saved: {}, current: {}",
-            self.id,
-            self.last_saved_revision,
-            current_revision
-        );
-        current_revision != self.last_saved_revision || !self.changes.is_empty()
-    }
-
-    /// Save modifications to history, and so [`Self::is_modified`] will return false.
-    pub fn reset_modified(&mut self) {
-        let history = self.history.take();
-        let current_revision = history.current_revision();
-        self.history.set(history);
-        self.last_saved_revision = current_revision;
-    }
 
     /// Set the document's latest saved revision to the given one.
     pub fn set_last_saved_revision(&mut self, rev: usize, save_time: SystemTime) {

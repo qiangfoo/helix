@@ -362,35 +362,8 @@ fn new_file(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> an
 
 /// Sets or reports the current document's line ending setting.
 /// Results in an error if there are modified buffers remaining and sets editor
-/// error, otherwise returns `Ok(())`. If the current document is unmodified,
-/// and there are modified documents, switches focus to one of them.
-pub(super) fn buffers_remaining_impl(editor: &mut Editor) -> anyhow::Result<()> {
-    let modified_ids: Vec<_> = editor
-        .documents()
-        .filter(|doc| doc.is_modified())
-        .map(|doc| doc.id())
-        .collect();
-
-    if let Some(first) = modified_ids.first() {
-        let current = doc!(editor);
-        // If the current document is unmodified, and there are modified
-        // documents, switch focus to the first modified doc.
-        if !modified_ids.contains(&current.id()) {
-            editor.switch(*first, Action::Replace);
-        }
-
-        let modified_names: Vec<_> = modified_ids
-            .iter()
-            .map(|doc_id| doc!(editor, doc_id).display_name())
-            .collect();
-
-        bail!(
-            "{} unsaved buffer{} remaining: {:?}",
-            modified_names.len(),
-            if modified_names.len() == 1 { "" } else { "s" },
-            modified_names,
-        );
-    }
+/// In a read-only editor, buffers are never modified, so this always succeeds.
+pub(super) fn buffers_remaining_impl(_editor: &mut Editor) -> anyhow::Result<()> {
     Ok(())
 }
 
@@ -417,9 +390,6 @@ pub fn write_all_impl(
         .into_iter()
         .filter_map(|id| {
             let doc = doc!(cx.editor, &id);
-            if !doc.is_modified() {
-                return None;
-            }
             if doc.path().is_none() {
                 if options.write_scratch {
                     errors.push("cannot write a buffer without a filename");

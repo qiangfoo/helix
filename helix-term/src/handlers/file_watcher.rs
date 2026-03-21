@@ -1,10 +1,13 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use helix_core::Rope;
 use helix_event::register_hook;
+use helix_view::document::DiffSource;
 use helix_view::events::{DocumentDidClose, DocumentDidOpen};
 use helix_view::handlers::{FileWatcherCommand, Handlers};
+use helix_view::{DocumentId, Editor};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc::{self, Sender};
 
@@ -39,6 +42,9 @@ pub fn spawn() -> Sender<FileWatcherCommand> {
         tokio::pin!(sleep);
         let mut debounce_active = false;
 
+        // Reference-counted worktree watches for local changes diff buffers
+        let mut worktree_refcounts: HashMap<PathBuf, usize> = HashMap::new();
+
         loop {
             tokio::select! {
                 cmd = cmd_rx.recv() => {
@@ -53,6 +59,26 @@ pub fn spawn() -> Sender<FileWatcherCommand> {
                             log::debug!("file_watcher: unwatching {:?}", path);
                             let _ = watcher.unwatch(&path);
                         }
+                        Some(FileWatcherCommand::WatchWorktree { worktree }) => {
+                            let count = worktree_refcounts.entry(worktree.clone()).or_insert(0);
+                            *count += 1;
+                            if *count == 1 {
+                                log::debug!("file_watcher: watching worktree {:?}", worktree);
+                                if let Err(e) = watcher.watch(&worktree, RecursiveMode::Recursive) {
+                                    log::warn!("file_watcher: failed to watch worktree {:?}: {}", worktree, e);
+                                }
+                            }
+                        }
+                        Some(FileWatcherCommand::UnwatchWorktree { worktree }) => {
+                            if let Some(count) = worktree_refcounts.get_mut(&worktree) {
+                                *count -= 1;
+                                if *count == 0 {
+                                    worktree_refcounts.remove(&worktree);
+                                    log::debug!("file_watcher: unwatching worktree {:?}", worktree);
+                                    let _ = watcher.unwatch(&worktree);
+                                }
+                            }
+                        }
                         None => break, // channel closed
                     }
                 }
@@ -65,7 +91,6 @@ pub fn spawn() -> Sender<FileWatcherCommand> {
                         EventKind::Modify(_) | EventKind::Create(_) => {
                             log::debug!("file_watcher: event {:?} paths {:?}", event.kind, event.paths);
                             for path in event.paths {
-                                // Use helix's canonicalize to match stored document paths
                                 pending_paths.insert(helix_stdx::path::canonicalize(&path));
                             }
                             // Reset the debounce timer
@@ -78,8 +103,29 @@ pub fn spawn() -> Sender<FileWatcherCommand> {
                 () = &mut sleep, if debounce_active => {
                     debounce_active = false;
                     let paths: Vec<PathBuf> = pending_paths.drain().collect();
-                    if !paths.is_empty() {
-                        dispatch_reloads(paths);
+                    if paths.is_empty() {
+                        continue;
+                    }
+
+                    let mut file_paths = Vec::new();
+                    let mut diff_refresh_needed = false;
+                    for path in paths {
+                        if worktree_refcounts.keys().any(|wt| path.starts_with(wt)) {
+                            diff_refresh_needed = true;
+                            // Also allow regular file reload (but not for .git/ internals)
+                            if !path.components().any(|c| c.as_os_str() == ".git") {
+                                file_paths.push(path);
+                            }
+                        } else {
+                            file_paths.push(path);
+                        }
+                    }
+
+                    if !file_paths.is_empty() {
+                        dispatch_reloads(file_paths);
+                    }
+                    if diff_refresh_needed {
+                        dispatch_diff_refreshes();
                     }
                 }
             }
@@ -150,12 +196,85 @@ fn dispatch_reloads(paths: Vec<PathBuf>) {
     });
 }
 
+fn dispatch_diff_refreshes() {
+    job::dispatch_blocking(move |editor, _compositor| {
+        let diff_providers = editor.diff_providers.clone();
+
+        let diff_docs: Vec<(DocumentId, DiffSource)> = editor
+            .documents()
+            .filter_map(|doc| doc.diff_source.as_ref().map(|src| (doc.id(), src.clone())))
+            .collect();
+
+        if diff_docs.is_empty() {
+            return;
+        }
+
+        // Regenerate diffs in a blocking background task
+        tokio::task::spawn_blocking(move || {
+            let results: Vec<(DocumentId, String)> = diff_docs
+                .into_iter()
+                .filter_map(|(id, source)| {
+                    let text = match &source {
+                        DiffSource::LocalChanges { cwd } => {
+                            diff_providers.get_local_diff(cwd).unwrap_or_default()
+                        }
+                        // CommitDiff doesn't refresh (hash is immutable)
+                        DiffSource::CommitDiff { .. } => return None,
+                    };
+                    Some((id, text))
+                })
+                .collect();
+
+            // Apply results back on the main thread
+            job::dispatch_blocking(move |editor, _compositor| {
+                let scrolloff = editor.config().scrolloff;
+                for (doc_id, new_text) in results {
+                    apply_diff_update(editor, doc_id, &new_text, scrolloff);
+                }
+            });
+        });
+    });
+}
+
+fn apply_diff_update(editor: &mut Editor, doc_id: DocumentId, new_text: &str, scrolloff: usize) {
+    let doc = match editor.documents.get_mut(&doc_id) {
+        Some(d) => d,
+        None => return,
+    };
+
+    let new_rope = Rope::from(new_text);
+    let transaction = helix_core::diff::compare_ropes(doc.text(), &new_rope);
+    if transaction.changes().is_empty() {
+        return;
+    }
+
+    let view_ids: Vec<_> = doc.selections().keys().cloned().collect();
+    if let Some(&view_id) = view_ids.first() {
+        doc.apply(&transaction, view_id);
+
+        for &vid in &view_ids {
+            let doc = editor.documents.get_mut(&doc_id).unwrap();
+            let view = editor.tree.get_mut(vid);
+            if view.doc == doc_id {
+                view.ensure_cursor_in_view(doc, scrolloff);
+            }
+        }
+    }
+}
+
 pub fn register_hooks(handlers: &Handlers) {
     let tx = handlers.file_watcher.clone();
     register_hook!(move |event: &mut DocumentDidOpen<'_>| {
         let doc = event.editor.document(event.doc).unwrap();
         if let Some(path) = doc.path().cloned() {
             helix_event::send_blocking(&tx, FileWatcherCommand::Watch { path });
+        }
+        // For local changes diff buffers, watch the worktree recursively
+        if let Some(DiffSource::LocalChanges { cwd }) = &doc.diff_source {
+            helix_event::send_blocking(
+                &tx,
+                FileWatcherCommand::WatchWorktree { worktree: cwd.clone() },
+            );
         }
         Ok(())
     });
@@ -164,6 +283,12 @@ pub fn register_hooks(handlers: &Handlers) {
     register_hook!(move |event: &mut DocumentDidClose<'_>| {
         if let Some(path) = event.doc.path().cloned() {
             helix_event::send_blocking(&tx, FileWatcherCommand::Unwatch { path });
+        }
+        if let Some(DiffSource::LocalChanges { cwd }) = &event.doc.diff_source {
+            helix_event::send_blocking(
+                &tx,
+                FileWatcherCommand::UnwatchWorktree { worktree: cwd.clone() },
+            );
         }
         Ok(())
     });

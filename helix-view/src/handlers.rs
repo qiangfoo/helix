@@ -10,6 +10,9 @@ use crate::Editor;
 pub enum FileWatcherCommand {
     Watch { path: PathBuf },
     Unwatch { path: PathBuf },
+    /// Watch a working tree directory recursively for local changes diff buffers.
+    WatchWorktree { worktree: PathBuf },
+    UnwatchWorktree { worktree: PathBuf },
 }
 
 pub mod diagnostics;
