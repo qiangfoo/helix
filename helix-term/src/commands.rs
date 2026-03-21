@@ -21,7 +21,6 @@ use helix_core::{
     char_idx_at_visual_offset,
     chars::char_is_word,
     command_line::{self, Args},
-    comment,
     doc_formatter::TextFormat,
     encoding, find_workspace,
     graphemes::{self, next_grapheme_boundary},
@@ -35,7 +34,7 @@ use helix_core::{
     regex::{self, Regex},
     search::{self},
     selection, surround,
-    syntax::config::{BlockCommentToken, LanguageServerFeature},
+    syntax::config::LanguageServerFeature,
     text_annotations::{Overlay, TextAnnotations},
     textobject,
     unicode::width::UnicodeWidthChar,
@@ -496,9 +495,6 @@ impl MappableCommand {
         keep_primary_selection, "Keep primary selection",
         remove_primary_selection, "Remove primary selection",
         hover, "Show docs for item under cursor",
-        toggle_comments, "Comment/uncomment selections",
-        toggle_line_comments, "Line comment/uncomment selections",
-        toggle_block_comments, "Block comment/uncomment selections",
         rotate_selections_forward, "Rotate selections forward",
         rotate_selections_backward, "Rotate selections backward",
         rotate_selection_contents_forward, "Rotate selection contents forward",
@@ -2856,11 +2852,7 @@ fn delete_selection_impl(cx: &mut Context, op: Operation, yank: YankAction) {
             exit_select_mode(cx);
         }
         Operation::Change => {
-            if only_whole_lines {
-                open(cx, Open::Above, CommentContinuation::Disabled);
-            } else {
-                // insert mode removed
-            }
+            // editing removed
         }
     }
 }
@@ -3472,131 +3464,6 @@ pub enum Open {
     Above,
 }
 
-#[derive(PartialEq)]
-pub enum CommentContinuation {
-    Enabled,
-    Disabled,
-}
-
-fn open(cx: &mut Context, open: Open, comment_continuation: CommentContinuation) {
-    let count = cx.count();
-    // insert mode removed
-    let config = cx.editor.config();
-    let (view, doc) = current!(cx.editor);
-    let loader = cx.editor.syn_loader.load();
-
-    let text = doc.text().slice(..);
-    let contents = doc.text();
-    let selection = doc.selection(view.id);
-    let mut offs = 0;
-
-    let mut ranges = SmallVec::with_capacity(selection.len());
-
-    let continue_comment_tokens =
-        if comment_continuation == CommentContinuation::Enabled && config.continue_comments {
-            doc.language_config()
-                .and_then(|config| config.comment_tokens.as_ref())
-        } else {
-            None
-        };
-
-    let mut transaction = Transaction::change_by_selection(contents, selection, |range| {
-        // the line number, where the cursor is currently
-        let curr_line_num = text.char_to_line(match open {
-            Open::Below => graphemes::prev_grapheme_boundary(text, range.to()),
-            Open::Above => range.from(),
-        });
-
-        // the next line number, where the cursor will be, after finishing the transaction
-        let next_new_line_num = match open {
-            Open::Below => curr_line_num + 1,
-            Open::Above => curr_line_num,
-        };
-
-        let above_next_new_line_num = next_new_line_num.saturating_sub(1);
-
-        let continue_comment_token = continue_comment_tokens
-            .and_then(|tokens| comment::get_comment_token(text, tokens, curr_line_num));
-
-        // Index to insert newlines after, as well as the char width
-        // to use to compensate for those inserted newlines.
-        let (above_next_line_end_index, above_next_line_end_width) = if next_new_line_num == 0 {
-            (0, 0)
-        } else {
-            (
-                line_end_char_index(&text, above_next_new_line_num),
-                doc.line_ending.len_chars(),
-            )
-        };
-
-        let line = text.line(curr_line_num);
-        let indent = match line.first_non_whitespace_char() {
-            Some(pos) if continue_comment_token.is_some() => line.slice(..pos).to_string(),
-            _ => indent::indent_for_newline(
-                &loader,
-                doc.syntax(),
-                &config.indent_heuristic,
-                &doc.indent_style,
-                doc.tab_width(),
-                text,
-                above_next_new_line_num,
-                above_next_line_end_index,
-                curr_line_num,
-            ),
-        };
-
-        let indent_len = indent.len();
-        let mut text = String::with_capacity(1 + indent_len);
-
-        if open == Open::Above && next_new_line_num == 0 {
-            text.push_str(&indent);
-            if let Some(token) = continue_comment_token {
-                text.push_str(token);
-                text.push(' ');
-            }
-            text.push_str(doc.line_ending.as_str());
-        } else {
-            text.push_str(doc.line_ending.as_str());
-            text.push_str(&indent);
-
-            if let Some(token) = continue_comment_token {
-                text.push_str(token);
-                text.push(' ');
-            }
-        }
-
-        let text = text.repeat(count);
-
-        // calculate new selection ranges
-        let pos = offs + above_next_line_end_index + above_next_line_end_width;
-        let comment_len = continue_comment_token
-            .map(|token| token.len() + 1) // `+ 1` for the extra space added
-            .unwrap_or_default();
-        for i in 0..count {
-            // pos                     -> beginning of reference line,
-            // + (i * (line_ending_len + indent_len + comment_len)) -> beginning of i'th line from pos (possibly including comment token)
-            // + indent_len + comment_len ->        -> indent for i'th line
-            ranges.push(Range::point(
-                pos + (i * (doc.line_ending.len_chars() + indent_len + comment_len))
-                    + indent_len
-                    + comment_len,
-            ));
-        }
-
-        // update the offset for the next range
-        offs += text.chars().count();
-
-        (
-            above_next_line_end_index,
-            above_next_line_end_index,
-            Some(text.into()),
-        )
-    });
-
-    transaction = transaction.with_selection(Selection::new(ranges, selection.primary_index()));
-
-    doc.apply(&transaction, view.id);
-}
 
 // o inserts a new line after each line with a selection
 // O inserts a new line before each line with a selection
@@ -4668,125 +4535,6 @@ fn remove_primary_selection(cx: &mut Context) {
     let selection = selection.clone().remove(index);
 
     doc.set_selection(view.id, selection);
-}
-
-// comments
-type CommentTransactionFn = fn(
-    line_token: Option<&str>,
-    block_tokens: Option<&[BlockCommentToken]>,
-    doc: &Rope,
-    selection: &Selection,
-) -> Transaction;
-
-fn toggle_comments_impl(cx: &mut Context, comment_transaction: CommentTransactionFn) {
-    let (view, doc) = current!(cx.editor);
-    let line_token: Option<&str> = doc
-        .language_config()
-        .and_then(|lc| lc.comment_tokens.as_ref())
-        .and_then(|tc| tc.first())
-        .map(|tc| tc.as_str());
-    let block_tokens: Option<&[BlockCommentToken]> = doc
-        .language_config()
-        .and_then(|lc| lc.block_comment_tokens.as_ref())
-        .map(|tc| &tc[..]);
-
-    let transaction =
-        comment_transaction(line_token, block_tokens, doc.text(), doc.selection(view.id));
-
-    doc.apply(&transaction, view.id);
-    exit_select_mode(cx);
-}
-
-/// commenting behavior:
-/// 1. only line comment tokens -> line comment
-/// 2. each line block commented -> uncomment all lines
-/// 3. whole selection block commented -> uncomment selection
-/// 4. all lines not commented and block tokens -> comment uncommented lines
-/// 5. no comment tokens and not block commented -> line comment
-fn toggle_comments(cx: &mut Context) {
-    toggle_comments_impl(cx, |line_token, block_tokens, doc, selection| {
-        let text = doc.slice(..);
-
-        // only have line comment tokens
-        if line_token.is_some() && block_tokens.is_none() {
-            return comment::toggle_line_comments(doc, selection, line_token);
-        }
-
-        let split_lines = comment::split_lines_of_selection(text, selection);
-
-        let default_block_tokens = &[BlockCommentToken::default()];
-        let block_comment_tokens = block_tokens.unwrap_or(default_block_tokens);
-
-        let (line_commented, line_comment_changes) =
-            comment::find_block_comments(block_comment_tokens, text, &split_lines);
-
-        // block commented by line would also be block commented so check this first
-        if line_commented {
-            return comment::create_block_comment_transaction(
-                doc,
-                &split_lines,
-                line_commented,
-                line_comment_changes,
-            )
-            .0;
-        }
-
-        let (block_commented, comment_changes) =
-            comment::find_block_comments(block_comment_tokens, text, selection);
-
-        // check if selection has block comments
-        if block_commented {
-            return comment::create_block_comment_transaction(
-                doc,
-                selection,
-                block_commented,
-                comment_changes,
-            )
-            .0;
-        }
-
-        // not commented and only have block comment tokens
-        if line_token.is_none() && block_tokens.is_some() {
-            return comment::create_block_comment_transaction(
-                doc,
-                &split_lines,
-                line_commented,
-                line_comment_changes,
-            )
-            .0;
-        }
-
-        // not block commented at all and don't have any tokens
-        comment::toggle_line_comments(doc, selection, line_token)
-    })
-}
-
-fn toggle_line_comments(cx: &mut Context) {
-    toggle_comments_impl(cx, |line_token, block_tokens, doc, selection| {
-        if line_token.is_none() && block_tokens.is_some() {
-            let default_block_tokens = &[BlockCommentToken::default()];
-            let block_comment_tokens = block_tokens.unwrap_or(default_block_tokens);
-            comment::toggle_block_comments(
-                doc,
-                &comment::split_lines_of_selection(doc.slice(..), selection),
-                block_comment_tokens,
-            )
-        } else {
-            comment::toggle_line_comments(doc, selection, line_token)
-        }
-    });
-}
-
-fn toggle_block_comments(cx: &mut Context) {
-    toggle_comments_impl(cx, |line_token, block_tokens, doc, selection| {
-        if line_token.is_some() && block_tokens.is_none() {
-            comment::toggle_line_comments(doc, selection, line_token)
-        } else {
-            let default_block_tokens = &[BlockCommentToken::default()];
-            let block_comment_tokens = block_tokens.unwrap_or(default_block_tokens);
-            comment::toggle_block_comments(doc, selection, block_comment_tokens)
-        }
-    });
 }
 
 fn rotate_selections(cx: &mut Context, direction: Direction) {
