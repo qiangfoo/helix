@@ -20,7 +20,7 @@ pub struct Configuration {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(rename_all = "kebab-case")]
 pub struct LanguageConfiguration {
     #[serde(skip)]
     pub(super) language: Option<Language>,
