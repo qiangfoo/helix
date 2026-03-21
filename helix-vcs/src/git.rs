@@ -3,7 +3,7 @@ use arc_swap::ArcSwap;
 use gix::filter::plumbing::driver::apply::Delay;
 use std::fmt::Write as _;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gix::bstr::ByteSlice;
@@ -85,6 +85,14 @@ pub fn get_repo_info(file: &Path) -> Result<(Arc<ArcSwap<Box<str>>>, Option<Stri
         Arc::new(ArcSwap::from_pointee(head_name.into_boxed_str())),
         worktree_name,
     ))
+}
+
+pub fn get_worktree_root(cwd: &Path) -> Result<PathBuf> {
+    let repo = open_repo(cwd)?.to_thread_local();
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| anyhow::anyhow!("bare repository"))?;
+    Ok(workdir.to_path_buf())
 }
 
 pub fn for_each_changed_file(cwd: &Path, f: impl Fn(Result<FileChange>) -> bool) -> Result<()> {

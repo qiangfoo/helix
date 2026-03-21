@@ -36,6 +36,19 @@ pub struct DiffProviderRegistry {
     providers: Vec<DiffProvider>,
 }
 
+/// Returns the git worktree root for the given directory, if in a git repo.
+pub fn get_worktree_root(cwd: &Path) -> Option<PathBuf> {
+    #[cfg(feature = "git")]
+    {
+        git::get_worktree_root(cwd).ok()
+    }
+    #[cfg(not(feature = "git"))]
+    {
+        let _ = cwd;
+        None
+    }
+}
+
 impl DiffProviderRegistry {
     /// Get the given file from the VCS. This provides the unedited document as a "base"
     /// for a diff to be created.

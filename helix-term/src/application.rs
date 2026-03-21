@@ -232,7 +232,27 @@ impl Application {
                 editor.new_file(Action::VerticalSplit);
             }
         } else if stdin().is_terminal() || cfg!(feature = "integration") {
-            editor.new_file(Action::VerticalSplit);
+            if let Some(session_files) = crate::session::load_session() {
+                let mut nr_of_files = 0;
+                for file in &session_files {
+                    let action = if nr_of_files == 0 { Action::VerticalSplit } else { Action::Load };
+                    match editor.open(file, action) {
+                        Ok(_) => nr_of_files += 1,
+                        Err(err) => log::warn!("Failed to restore session file {}: {err}", file.display()),
+                    }
+                }
+                if nr_of_files > 0 {
+                    editor.set_status(format!(
+                        "Restored {} file{}.",
+                        nr_of_files,
+                        if nr_of_files == 1 { "" } else { "s" }
+                    ));
+                } else {
+                    editor.new_file(Action::VerticalSplit);
+                }
+            } else {
+                editor.new_file(Action::VerticalSplit);
+            }
         } else {
             editor
                 .new_file_from_stdin(Action::VerticalSplit)
@@ -1321,6 +1341,9 @@ impl Application {
         // [NOTE] we intentionally do not return early for errors because we
         //        want to try to run as much cleanup as we can, regardless of
         //        errors along the way
+
+        crate::session::save_session(&self.editor);
+
         let mut errs = Vec::new();
 
         if let Err(err) = self
