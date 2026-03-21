@@ -1631,7 +1631,7 @@ fn yank_diagnostic(
 
     cx.editor.registers.write(reg, diag)?;
     cx.editor.set_status(format!(
-        "Yanked {n} diagnostic{} to register {reg}",
+        "Yanked {n} diagnostic{} to clipboard",
         if n == 1 { "" } else { "s" }
     ));
     Ok(())
@@ -2220,7 +2220,7 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     TypableCommand {
         name: "yank-diagnostic",
         aliases: &[],
-        doc: "Yank diagnostic(s) under primary cursor to register, or clipboard by default",
+        doc: "Yank diagnostic(s) under primary cursor to clipboard",
         fun: yank_diagnostic,
         completer: CommandCompleter::none(),
         signature: Signature {

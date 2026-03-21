@@ -3435,7 +3435,7 @@ fn yank_impl(editor: &mut Editor, register: char) {
 
     match editor.registers.write(register, values) {
         Ok(_) => editor.set_status(format!(
-            "yanked {selections} selection{} to register {register}",
+            "yanked {selections} selection{} to clipboard",
             if selections == 1 { "" } else { "s" }
         )),
         Err(err) => editor.set_error(err.to_string()),
@@ -3460,7 +3460,7 @@ fn yank_joined_impl(editor: &mut Editor, separator: &str, register: char) {
 
     match editor.registers.write(register, vec![joined]) {
         Ok(_) => editor.set_status(format!(
-            "joined and yanked {selections} selection{} to register {register}",
+            "joined and yanked {selections} selection{} to clipboard",
             if selections == 1 { "" } else { "s" }
         )),
         Err(err) => editor.set_error(err.to_string()),
@@ -3492,7 +3492,7 @@ pub(crate) fn yank_main_selection_to_register(editor: &mut Editor, register: cha
     let selection = doc.selection(view.id).primary().fragment(text).to_string();
 
     match editor.registers.write(register, vec![selection]) {
-        Ok(_) => editor.set_status(format!("yanked primary selection to register {register}",)),
+        Ok(_) => editor.set_status("yanked primary selection to clipboard"),
         Err(err) => editor.set_error(err.to_string()),
     }
 }
