@@ -1,7 +1,6 @@
 pub use encoding_rs as encoding;
 
 pub mod auto_pairs;
-pub mod case_conversion;
 pub mod chars;
 pub mod command_line;
 pub mod comment;
@@ -30,7 +29,6 @@ pub mod text_annotations;
 pub mod textobject;
 mod transaction;
 pub mod uri;
-pub mod wrap;
 
 pub mod unicode {
     pub use unicode_general_category as category;

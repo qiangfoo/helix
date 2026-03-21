@@ -1335,16 +1335,6 @@ impl Component for EditorView {
                 EventResult::Consumed(None)
             }
             Event::FocusLost => {
-                if context.editor.config().auto_save.focus_lost {
-                    let options = commands::WriteAllOptions {
-                        force: false,
-                        write_scratch: false,
-                        auto_format: false,
-                    };
-                    if let Err(e) = commands::typed::write_all_impl(context, options) {
-                        context.editor.set_error(format!("{}", e));
-                    }
-                }
                 self.terminal_focused = false;
                 EventResult::Consumed(None)
             }

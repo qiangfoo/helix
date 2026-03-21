@@ -6,7 +6,6 @@ use helix_event::AsyncHook;
 
 use crate::config::Config;
 use crate::events;
-use crate::handlers::auto_save::AutoSaveHandler;
 use crate::handlers::diagnostics::PullDiagnosticsHandler;
 use crate::handlers::signature_help::SignatureHelpHandler;
 
@@ -15,7 +14,6 @@ pub use helix_view::handlers::{word_index, Handlers};
 use self::document_colors::DocumentColorsHandler;
 use self::document_links::DocumentLinksHandler;
 
-mod auto_save;
 pub mod diagnostics;
 mod document_colors;
 mod document_highlight;
@@ -27,7 +25,6 @@ pub fn setup(_config: Arc<ArcSwap<Config>>) -> Handlers {
     events::register();
 
     let signature_hints = SignatureHelpHandler::new().spawn();
-    let auto_save = AutoSaveHandler::new().spawn();
     let document_colors = DocumentColorsHandler::default().spawn();
     let document_links = DocumentLinksHandler::default().spawn();
     let word_index = word_index::Handler::spawn();
@@ -37,7 +34,6 @@ pub fn setup(_config: Arc<ArcSwap<Config>>) -> Handlers {
 
     let handlers = Handlers {
         signature_hints,
-        auto_save,
         document_colors,
         document_links,
         word_index,
@@ -49,7 +45,6 @@ pub fn setup(_config: Arc<ArcSwap<Config>>) -> Handlers {
     helix_view::handlers::register_hooks(&handlers);
     signature_help::register_hooks(&handlers);
     document_highlight::register_hooks(&handlers);
-    auto_save::register_hooks(&handlers);
     diagnostics::register_hooks(&handlers);
     document_colors::register_hooks(&handlers);
     document_links::register_hooks(&handlers);

@@ -62,7 +62,6 @@ use arc_swap::{
 };
 
 pub const DIR_STACK_CAP: usize = 10;
-pub const DEFAULT_AUTO_SAVE_DELAY: u64 = 3000;
 
 fn deserialize_duration_millis<'de, D>(deserializer: D) -> Result<Duration, D::Error>
 where
@@ -330,11 +329,6 @@ pub struct Config {
     pub auto_format: bool,
     /// Default register used for yank/paste. Defaults to '"'
     pub default_yank_register: char,
-    /// Automatic save on focus lost and/or after delay.
-    /// Time delay in milliseconds since last edit after which auto save timer triggers.
-    /// Time delay defaults to false with 3000ms delay. Focus lost defaults to false.
-    #[serde(deserialize_with = "deserialize_auto_save")]
-    pub auto_save: AutoSave,
     /// Automatically reload buffers when the underlying file changes on disk. Defaults to true.
     pub auto_reload: bool,
     /// Set a global text_width
@@ -924,60 +918,6 @@ impl WhitespaceRender {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct AutoSave {
-    /// Auto save after a delay in milliseconds. Defaults to disabled.
-    #[serde(default)]
-    pub after_delay: AutoSaveAfterDelay,
-    /// Auto save on focus lost. Defaults to false.
-    #[serde(default)]
-    pub focus_lost: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct AutoSaveAfterDelay {
-    #[serde(default)]
-    /// Enable auto save after delay. Defaults to false.
-    pub enable: bool,
-    #[serde(default = "default_auto_save_delay")]
-    /// Time delay in milliseconds. Defaults to [DEFAULT_AUTO_SAVE_DELAY].
-    pub timeout: u64,
-}
-
-impl Default for AutoSaveAfterDelay {
-    fn default() -> Self {
-        Self {
-            enable: false,
-            timeout: DEFAULT_AUTO_SAVE_DELAY,
-        }
-    }
-}
-
-fn default_auto_save_delay() -> u64 {
-    DEFAULT_AUTO_SAVE_DELAY
-}
-
-fn deserialize_auto_save<'de, D>(deserializer: D) -> Result<AutoSave, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize, Serialize)]
-    #[serde(untagged, deny_unknown_fields, rename_all = "kebab-case")]
-    enum AutoSaveToml {
-        EnableFocusLost(bool),
-        AutoSave(AutoSave),
-    }
-
-    match AutoSaveToml::deserialize(deserializer)? {
-        AutoSaveToml::EnableFocusLost(focus_lost) => Ok(AutoSave {
-            focus_lost,
-            ..Default::default()
-        }),
-        AutoSaveToml::AutoSave(auto_save) => Ok(auto_save),
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1109,7 +1049,6 @@ impl Default for Config {
             word_completion: WordCompletion::default(),
             auto_format: true,
             default_yank_register: '"',
-            auto_save: AutoSave::default(),
             auto_reload: true,
             idle_timeout: Duration::from_millis(250),
             completion_timeout: Duration::from_millis(250),

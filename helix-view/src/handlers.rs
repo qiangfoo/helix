@@ -19,15 +19,8 @@ pub mod diagnostics;
 pub mod lsp;
 pub mod word_index;
 
-#[derive(Debug)]
-pub enum AutoSaveEvent {
-    DocumentChanged { save_after: u64 },
-    LeftInsertMode,
-}
-
 pub struct Handlers {
     pub signature_hints: Sender<lsp::SignatureHelpEvent>,
-    pub auto_save: Sender<AutoSaveEvent>,
     pub document_colors: Sender<lsp::DocumentColorsEvent>,
     pub document_links: Sender<lsp::DocumentLinksEvent>,
     pub word_index: word_index::Handler,
