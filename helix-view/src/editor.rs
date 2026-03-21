@@ -43,11 +43,10 @@ use anyhow::{anyhow, bail, Error};
 
 pub use helix_core::diagnostic::Severity;
 use helix_core::{
-    auto_pairs::AutoPairs,
     diagnostic::DiagnosticProvider,
     syntax::{
         self,
-        config::{AutoPairConfig, IndentationHeuristic, LanguageServerFeature, SoftWrap},
+        config::{IndentationHeuristic, LanguageServerFeature, SoftWrap},
     },
     Change, LineEnding, Position, Range, Selection, Uri, NATIVE_LINE_ENDING,
 };
@@ -311,10 +310,6 @@ pub struct Config {
     pub gutters: GutterConfig,
     /// Middle click paste support. Defaults to true.
     pub middle_click_paste: bool,
-    /// Automatic insertion of pairs to parentheses, brackets,
-    /// etc. Optionally, this can be a list of 2-tuples to specify a
-    /// global list of characters to pair. Defaults to true.
-    pub auto_pairs: AutoPairConfig,
     /// Automatic auto-completion, automatically pop up without user trigger. Defaults to true.
     pub auto_completion: bool,
     /// Enable filepath completion.
@@ -1043,7 +1038,6 @@ impl Default for Config {
             cursorcolumn: false,
             gutters: GutterConfig::default(),
             middle_click_paste: true,
-            auto_pairs: AutoPairConfig::default(),
             auto_completion: true,
             path_completion: true,
             word_completion: WordCompletion::default(),
@@ -1150,7 +1144,6 @@ pub struct Editor {
     pub autoinfo: Option<Info>,
 
     pub config: Arc<dyn DynAccess<Config>>,
-    pub auto_pairs: Option<AutoPairs>,
 
     pub idle_timer: Pin<Box<Sleep>>,
     redraw_timer: Pin<Box<Sleep>>,
@@ -1238,8 +1231,6 @@ impl Editor {
     ) -> Self {
         let language_servers = helix_lsp::Registry::new(syn_loader.clone());
         let conf = config.load();
-        let auto_pairs = (&conf.auto_pairs).into();
-
         // HAXX: offset the render area height by 1 to account for prompt/commandline
         area.height -= 1;
 
@@ -1274,7 +1265,6 @@ impl Editor {
             last_motion: None,
             last_cwd: None,
             config,
-            auto_pairs,
             exit_code: 0,
             config_events: unbounded_channel(),
             needs_redraw: false,
@@ -1321,7 +1311,6 @@ impl Editor {
     /// relevant members.
     pub fn refresh_config(&mut self, old_config: &Config) {
         let config = self.config();
-        self.auto_pairs = (&config.auto_pairs).into();
         self.reset_idle_timer();
         self._refresh();
         helix_event::dispatch(crate::events::ConfigDidChange {

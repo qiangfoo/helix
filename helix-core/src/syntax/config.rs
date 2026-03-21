@@ -1,4 +1,4 @@
-use crate::{auto_pairs::AutoPairs, diagnostic::Severity, Language};
+use crate::{diagnostic::Severity, Language};
 
 use helix_stdx::rope;
 use serde::{ser::SerializeSeq as _, Deserialize, Serialize};
@@ -86,13 +86,6 @@ pub struct LanguageConfiguration {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub debugger: Option<DebugAdapterConfig>,
-
-    /// Automatic insertion of pairs to parentheses, brackets,
-    /// etc. Defaults to true. Optionally, this can be a list of 2-tuples
-    /// to specify a list of characters to pair. This overrides the
-    /// global setting.
-    #[serde(default, skip_serializing, deserialize_with = "deserialize_auto_pairs")]
-    pub auto_pairs: Option<AutoPairs>,
 
     pub rulers: Option<Vec<u16>>, // if set, override editor's rulers
 
@@ -527,49 +520,6 @@ pub enum IndentationHeuristic {
     Hybrid,
 }
 
-/// Configuration for auto pairs
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields, untagged)]
-pub enum AutoPairConfig {
-    /// Enables or disables auto pairing. False means disabled. True means to use the default pairs.
-    Enable(bool),
-
-    /// The mappings of pairs.
-    Pairs(HashMap<char, char>),
-}
-
-impl Default for AutoPairConfig {
-    fn default() -> Self {
-        AutoPairConfig::Enable(true)
-    }
-}
-
-impl From<&AutoPairConfig> for Option<AutoPairs> {
-    fn from(auto_pair_config: &AutoPairConfig) -> Self {
-        match auto_pair_config {
-            AutoPairConfig::Enable(false) => None,
-            AutoPairConfig::Enable(true) => Some(AutoPairs::default()),
-            AutoPairConfig::Pairs(pairs) => Some(AutoPairs::new(pairs.iter())),
-        }
-    }
-}
-
-impl From<AutoPairConfig> for Option<AutoPairs> {
-    fn from(auto_pairs_config: AutoPairConfig) -> Self {
-        (&auto_pairs_config).into()
-    }
-}
-
-impl FromStr for AutoPairConfig {
-    type Err = std::str::ParseBoolError;
-
-    // only do bool parsing for runtime setting
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let enable: bool = s.parse()?;
-        Ok(AutoPairConfig::Enable(enable))
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 pub struct SoftWrap {
@@ -638,13 +588,6 @@ where
             ))
         }
     })
-}
-
-pub fn deserialize_auto_pairs<'de, D>(deserializer: D) -> Result<Option<AutoPairs>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(Option::<AutoPairConfig>::deserialize(deserializer)?.and_then(AutoPairConfig::into))
 }
 
 fn default_timeout() -> u64 {
