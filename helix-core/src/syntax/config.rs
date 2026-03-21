@@ -9,7 +9,6 @@ use std::{
     fmt::{self, Display},
     num::NonZeroU8,
     path::PathBuf,
-    str::FromStr,
 };
 
 #[derive(Debug, Serialize, Deserialize)]

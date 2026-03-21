@@ -1,14 +1,11 @@
 use crate::{
     annotations::diagnostics::{DiagnosticFilter, InlineDiagnosticsConfig},
     clipboard::ClipboardProvider,
-    document::{
-        DocumentOpenError, DocumentSavedEventFuture, DocumentSavedEventResult, Mode, SavePoint,
-    },
+    document::{DocumentOpenError, DocumentSavedEventFuture, DocumentSavedEventResult, Mode},
     events::{DocumentDidClose, DocumentDidOpen, DocumentFocusLost},
     graphics::{CursorKind, Rect},
     handlers::Handlers,
     info::Info,
-    input::KeyEvent,
     register::Registers,
     theme::{self, Theme},
     tree::{self, Tree},
@@ -48,7 +45,7 @@ use helix_core::{
         self,
         config::{IndentationHeuristic, LanguageServerFeature, SoftWrap},
     },
-    Change, LineEnding, Position, Range, Selection, Uri, NATIVE_LINE_ENDING,
+    LineEnding, Position, Range, Selection, Uri, NATIVE_LINE_ENDING,
 };
 use helix_lsp::lsp;
 use helix_stdx::path::canonicalize;
@@ -1797,8 +1794,8 @@ impl Editor {
         self._refresh();
     }
 
-    pub fn close_document(&mut self, doc_id: DocumentId, force: bool) -> Result<(), CloseError> {
-        let doc = match self.documents.get(&doc_id) {
+    pub fn close_document(&mut self, doc_id: DocumentId, _force: bool) -> Result<(), CloseError> {
+        let _doc = match self.documents.get(&doc_id) {
             Some(doc) => doc,
             None => return Err(CloseError::DoesNotExist),
         };

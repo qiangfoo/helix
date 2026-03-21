@@ -3,12 +3,11 @@ pub(crate) mod syntax;
 pub(crate) mod typed;
 
 use futures_util::FutureExt;
-use helix_event::status;
 use helix_stdx::{
     path::{self, find_paths},
     rope::{self, RopeSliceExt},
 };
-use helix_vcs::{CommitInfo, FileChange, Hunk};
+use helix_vcs::{CommitInfo, Hunk};
 pub use lsp::*;
 pub use syntax::*;
 use tui::{
@@ -20,29 +19,27 @@ pub use typed::*;
 use helix_core::{
     char_idx_at_visual_offset,
     chars::char_is_word,
-    command_line::{self, Args},
+    command_line,
     doc_formatter::TextFormat,
     encoding, find_workspace,
     graphemes::{self, next_grapheme_boundary},
-    indent::{self, IndentStyle},
-    line_ending::{get_line_ending_of_str, line_end_char_index},
+    indent,
+    line_ending::line_end_char_index,
     match_brackets,
     movement::{self, move_vertically_visual, Direction},
     object, pos_at_coords,
-    regex::{self, Regex},
+    regex,
     search::{self},
-    selection, surround,
+    selection,
     syntax::config::LanguageServerFeature,
     text_annotations::{Overlay, TextAnnotations},
     textobject,
-    unicode::width::UnicodeWidthChar,
-    visual_offset_from_block, Deletion, LineEnding, Position, Range, Rope, RopeReader, RopeSlice,
-    Selection, SmallVec, Syntax, Tendril, Transaction,
+    visual_offset_from_block, Position, Range, Rope, RopeReader, RopeSlice,
+    Selection, SmallVec, Syntax, Tendril,
 };
 use helix_view::{
-    document::{DiffSource, FormatterError, Mode, SCRATCH_BUFFER_NAME},
+    document::{DiffSource, Mode, SCRATCH_BUFFER_NAME},
     editor::{Action, Motion},
-    expansion,
     info::Info,
     input::KeyEvent,
     keyboard::KeyCode,
@@ -65,10 +62,8 @@ use crate::{
 
 use crate::job::{self, Jobs};
 use std::{
-    char::{ToLowercase, ToUppercase},
     cmp::Ordering,
     collections::{HashMap, HashSet},
-    error::Error,
     fmt,
     future::Future,
     io::Read,

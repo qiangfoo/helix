@@ -1,15 +1,11 @@
 use futures_util::{stream::FuturesOrdered, FutureExt};
 use helix_lsp::{
-    block_on,
-    lsp::{
-        self, CodeAction, CodeActionOrCommand, CodeActionTriggerKind, DiagnosticSeverity,
-        NumberOrString,
-    },
-    util::{diagnostic_to_lsp_diagnostic, lsp_range_to_range, range_to_lsp_range},
-    Client, LanguageServerId, OffsetEncoding,
+    lsp::{self, DiagnosticSeverity, NumberOrString},
+    util::lsp_range_to_range,
+    Client, OffsetEncoding,
 };
 use tokio_stream::StreamExt;
-use tui::{text::Span, widgets::Row};
+use tui::text::Span;
 
 use super::{align_view, push_jump, Align, Context, Editor};
 
@@ -27,12 +23,12 @@ use helix_view::{
 };
 
 use crate::{
-    compositor::{self, Compositor},
+    compositor::Compositor,
     job::Callback,
-    ui::{self, overlay::overlaid, FileLocation, Picker, Popup, PromptEvent},
+    ui::{self, overlay::overlaid, FileLocation, Picker, Popup},
 };
 
-use std::{cmp::Ordering, collections::HashSet, fmt::Display, future::Future, path::Path};
+use std::{collections::HashSet, fmt::Display, future::Future, path::Path};
 
 /// Gets the first language server that is attached to a document which supports a specific feature.
 /// If there is no configured language server that supports the feature, this displays a status message.

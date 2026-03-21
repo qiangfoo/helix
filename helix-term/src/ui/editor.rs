@@ -25,7 +25,7 @@ use helix_view::{
     annotations::diagnostics::DiagnosticFilter,
     document::{Mode, SCRATCH_BUFFER_NAME},
     editor::CursorShapeConfig,
-    graphics::{Color, CursorKind, Modifier, Rect, Style},
+    graphics::{Color, CursorKind, Rect, Style},
     input::{KeyEvent, MouseButton, MouseEvent, MouseEventKind},
     keyboard::{KeyCode, KeyModifiers},
     Document, DocumentId, Editor, Theme, View,

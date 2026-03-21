@@ -1,13 +1,10 @@
 use std::fmt::Write;
 use std::ops::{self, Deref};
 
-use crate::job::Job;
-
 use super::*;
 
 use helix_core::command_line::{Args, Flag, Signature, Token, TokenKind};
 use helix_core::fuzzy::fuzzy_match;
-use helix_core::line_ending;
 use helix_stdx::path::home_dir;
 use helix_view::document::DEFAULT_LANGUAGE_NAME;
 use helix_view::editor::{CloseError, ConfigEvent};

@@ -1,6 +1,5 @@
 use crate::{ChangeSet, Rope, Selection, Transaction};
 use std::num::NonZeroUsize;
-use std::time::Instant;
 
 #[derive(Debug, Clone)]
 pub struct State {
@@ -24,7 +23,6 @@ struct Revision {
     last_child: Option<NonZeroUsize>,
     transaction: Transaction,
     inversion: Transaction,
-    timestamp: Instant,
 }
 
 impl Default for History {
@@ -35,7 +33,6 @@ impl Default for History {
                 last_child: None,
                 transaction: Transaction::from(ChangeSet::new("".into())),
                 inversion: Transaction::from(ChangeSet::new("".into())),
-                timestamp: Instant::now(),
             }],
             current: 0,
         }
@@ -44,15 +41,6 @@ impl Default for History {
 
 impl History {
     pub fn commit_revision(&mut self, transaction: &Transaction, original: &State) {
-        self.commit_revision_at_timestamp(transaction, original, Instant::now());
-    }
-
-    pub fn commit_revision_at_timestamp(
-        &mut self,
-        transaction: &Transaction,
-        original: &State,
-        timestamp: Instant,
-    ) {
         let inversion = transaction
             .invert(&original.doc)
             .with_selection(original.selection.clone());
@@ -64,7 +52,6 @@ impl History {
             last_child: None,
             transaction: transaction.clone(),
             inversion,
-            timestamp,
         });
         self.current = new_current;
     }

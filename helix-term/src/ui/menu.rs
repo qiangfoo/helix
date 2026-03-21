@@ -6,7 +6,7 @@ use tui::{buffer::Buffer as Surface, widgets::Table};
 
 pub use tui::widgets::{Cell, Row};
 
-use helix_view::{editor::SmartTabConfig, graphics::Rect, Editor};
+use helix_view::{graphics::Rect, Editor};
 use tui::layout::Constraint;
 
 pub trait Item: Sync + Send + 'static {
