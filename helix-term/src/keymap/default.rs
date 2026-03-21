@@ -56,24 +56,14 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
         },
         ":" => command_mode,
 
-        "C" => copy_selection_on_next_line,
-        "A-C" => copy_selection_on_prev_line,
-
-        "s" => select_regex,
-        "A-s" => split_selection_on_newline,
-        "A-minus" => merge_selections,
-        "A-_" => merge_consecutive_selections,
-        "S" => split_selection,
         ";" => collapse_selection,
         "A-;" => flip_selections,
         "A-o" | "A-up" => expand_selection,
         "A-i" | "A-down" => shrink_selection,
-        "A-I" | "A-S-down" => select_all_children,
         "A-p" | "A-left" => select_prev_sibling,
         "A-n" | "A-right" => select_next_sibling,
         "A-e" => move_parent_node_end,
         "A-b" => move_parent_node_start,
-        "A-a" => select_all_siblings,
 
         "%" => select_all,
         "x" => extend_line_below,
@@ -124,16 +114,9 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
         "y" => yank,
         "Y" => yank_main_selection_to_clipboard,
 
-        "K" => keep_selections,
-        "A-K" => remove_selections,
-
-        "," => keep_primary_selection,
-        "A-," => remove_primary_selection,
 
         "_" => trim_selections,
 
-        "(" => rotate_selections_backward,
-        ")" => rotate_selections_forward,
 
         "A-:" => ensure_selections_forward,
 
@@ -265,8 +248,6 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
         "A-e" => extend_parent_node_end,
         "A-b" => extend_parent_node_start,
 
-        "n" => extend_search_next,
-        "N" => extend_search_prev,
 
         "t" => extend_till_char,
         "f" => extend_next_char,

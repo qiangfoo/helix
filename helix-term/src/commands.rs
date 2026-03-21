@@ -30,12 +30,11 @@ use helix_core::{
     object, pos_at_coords,
     regex,
     search::{self},
-    selection,
     syntax::config::LanguageServerFeature,
     text_annotations::{Overlay, TextAnnotations},
     textobject,
-    visual_offset_from_block, Position, Range, Rope, RopeReader, RopeSlice,
-    Selection, SmallVec, Syntax, Tendril,
+    visual_offset_from_block, Range, Rope, RopeReader, RopeSlice,
+    Selection, SmallVec, Tendril,
 };
 use helix_view::{
     document::{DiffSource, Mode, SCRATCH_BUFFER_NAME},
@@ -295,8 +294,6 @@ impl MappableCommand {
         extend_line_down, "Extend down",
         extend_visual_line_up, "Extend up",
         extend_visual_line_down, "Extend down",
-        copy_selection_on_next_line, "Copy selection on next line",
-        copy_selection_on_prev_line, "Copy selection on previous line",
         move_next_word_start, "Move to start of next word",
         move_prev_word_start, "Move to start of previous word",
         move_next_word_end, "Move to end of next word",
@@ -343,17 +340,10 @@ impl MappableCommand {
         page_cursor_half_up, "Move page and cursor half up",
         page_cursor_half_down, "Move page and cursor half down",
         select_all, "Select whole document",
-        select_regex, "Select all regex matches inside selections",
-        split_selection, "Split selections on regex matches",
-        split_selection_on_newline, "Split selection on newlines",
-        merge_selections, "Merge selections",
-        merge_consecutive_selections, "Merge consecutive selections",
         search, "Search for regex pattern",
         rsearch, "Reverse search for regex pattern",
         search_next, "Select next search match",
         search_prev, "Select previous search match",
-        extend_search_next, "Add next search match to selection",
-        extend_search_prev, "Add previous search match to selection",
         search_selection, "Use current selection as search pattern",
         search_selection_detect_word_boundaries, "Use current selection as the search pattern, automatically wrapping with `\\b` on word boundaries",
         make_search_word_bounded, "Modify current search to make it word bounded",
@@ -441,19 +431,11 @@ impl MappableCommand {
         yank_location_to_clipboard, "Yank file path and line range to clipboard",
         yank_joined_to_primary_clipboard, "Join and yank selections to primary clipboard",
         yank_main_selection_to_primary_clipboard, "Yank main selection to primary clipboard",
-        keep_selections, "Keep selections matching regex",
-        remove_selections, "Remove selections matching regex",
-        keep_primary_selection, "Keep primary selection",
-        remove_primary_selection, "Remove primary selection",
         hover, "Show docs for item under cursor",
-        rotate_selections_forward, "Rotate selections forward",
-        rotate_selections_backward, "Rotate selections backward",
         expand_selection, "Expand selection to parent syntax node",
         shrink_selection, "Shrink selection to previously expanded syntax node",
         select_next_sibling, "Select next sibling in the syntax tree",
         select_prev_sibling, "Select previous sibling the in syntax tree",
-        select_all_siblings, "Select all siblings of the current node",
-        select_all_children, "Select all children of the current node",
         jump_forward, "Jump forward on jumplist",
         jump_backward, "Jump backward on jumplist",
         save_selection, "Save current selection to jumplist",
@@ -503,8 +485,6 @@ impl MappableCommand {
         command_palette, "Open command palette",
         goto_word, "Jump to a two-character label",
         extend_to_word, "Extend to a two-character label",
-        rotate_selections_first, "Make the first selection your primary one",
-        rotate_selections_last, "Make the last selection your primary one",
     );
 }
 
@@ -896,7 +876,9 @@ fn trim_selections(cx: &mut Context) {
         doc.set_selection(view.id, Selection::new(ranges, idx));
     } else {
         collapse_selection(cx);
-        keep_primary_selection(cx);
+        let (view, doc) = current!(cx.editor);
+        let range = doc.selection(view.id).primary();
+        doc.set_selection(view.id, Selection::single(range.anchor, range.head));
     };
 }
 
@@ -1652,168 +1634,11 @@ fn page_cursor_half_down(cx: &mut Context) {
     scroll(cx, offset, Direction::Forward, true);
 }
 
-#[allow(deprecated)]
-// currently uses the deprecated `visual_coords_at_pos`/`pos_at_visual_coords` functions
-// as this function ignores softwrapping (and virtual text) and instead only cares
-// about "text visual position"
-//
-// TODO: implement a variant of that uses visual lines and respects virtual text
-fn copy_selection_on_line(cx: &mut Context, direction: Direction) {
-    use helix_core::{pos_at_visual_coords, visual_coords_at_pos};
-
-    let count = cx.count();
-    let (view, doc) = current!(cx.editor);
-    let text = doc.text().slice(..);
-    let selection = doc.selection(view.id);
-    let mut ranges = SmallVec::with_capacity(selection.ranges().len() * (count + 1));
-    ranges.extend_from_slice(selection.ranges());
-    let mut primary_index = 0;
-    for range in selection.iter() {
-        let is_primary = *range == selection.primary();
-
-        // The range is always head exclusive
-        let (head, anchor) = if range.anchor < range.head {
-            (range.head - 1, range.anchor)
-        } else {
-            (range.head, range.anchor.saturating_sub(1))
-        };
-
-        let tab_width = doc.tab_width();
-
-        let head_pos = visual_coords_at_pos(text, head, tab_width);
-        let anchor_pos = visual_coords_at_pos(text, anchor, tab_width);
-
-        let height = std::cmp::max(head_pos.row, anchor_pos.row)
-            - std::cmp::min(head_pos.row, anchor_pos.row)
-            + 1;
-
-        if is_primary {
-            primary_index = ranges.len();
-        }
-        ranges.push(*range);
-
-        let mut sels = 0;
-        let mut i = 0;
-        while sels < count {
-            let offset = (i + 1) * height;
-
-            let anchor_row = match direction {
-                Direction::Forward => anchor_pos.row + offset,
-                Direction::Backward => anchor_pos.row.saturating_sub(offset),
-            };
-
-            let head_row = match direction {
-                Direction::Forward => head_pos.row + offset,
-                Direction::Backward => head_pos.row.saturating_sub(offset),
-            };
-
-            if anchor_row >= text.len_lines() || head_row >= text.len_lines() {
-                break;
-            }
-
-            let anchor =
-                pos_at_visual_coords(text, Position::new(anchor_row, anchor_pos.col), tab_width);
-            let head = pos_at_visual_coords(text, Position::new(head_row, head_pos.col), tab_width);
-
-            // skip lines that are too short
-            if visual_coords_at_pos(text, anchor, tab_width).col == anchor_pos.col
-                && visual_coords_at_pos(text, head, tab_width).col == head_pos.col
-            {
-                if is_primary {
-                    primary_index = ranges.len();
-                }
-                // This is Range::new(anchor, head), but it will place the cursor on the correct column
-                ranges.push(Range::point(anchor).put_cursor(text, head, true));
-                sels += 1;
-            }
-
-            if anchor_row == 0 && head_row == 0 {
-                break;
-            }
-
-            i += 1;
-        }
-    }
-
-    let selection = Selection::new(ranges, primary_index);
-    doc.set_selection(view.id, selection);
-}
-
-fn copy_selection_on_prev_line(cx: &mut Context) {
-    copy_selection_on_line(cx, Direction::Backward)
-}
-
-fn copy_selection_on_next_line(cx: &mut Context) {
-    copy_selection_on_line(cx, Direction::Forward)
-}
-
 fn select_all(cx: &mut Context) {
     let (view, doc) = current!(cx.editor);
 
     let end = doc.text().len_chars();
     doc.set_selection(view.id, Selection::single(0, end))
-}
-
-fn select_regex(cx: &mut Context) {
-    let reg = '/';
-    ui::regex_prompt(
-        cx,
-        "select:".into(),
-        Some(reg),
-        ui::completers::none,
-        move |cx, regex, event| {
-            let (view, doc) = current!(cx.editor);
-            if !matches!(event, PromptEvent::Update | PromptEvent::Validate) {
-                return;
-            }
-            let text = doc.text().slice(..);
-            if let Some(selection) =
-                selection::select_on_matches(text, doc.selection(view.id), &regex)
-            {
-                doc.set_selection(view.id, selection);
-            } else if event == PromptEvent::Validate {
-                cx.editor.set_error("nothing selected");
-            }
-        },
-    );
-}
-
-fn split_selection(cx: &mut Context) {
-    let reg = '/';
-    ui::regex_prompt(
-        cx,
-        "split:".into(),
-        Some(reg),
-        ui::completers::none,
-        move |cx, regex, event| {
-            let (view, doc) = current!(cx.editor);
-            if !matches!(event, PromptEvent::Update | PromptEvent::Validate) {
-                return;
-            }
-            let text = doc.text().slice(..);
-            let selection = selection::split_on_matches(text, doc.selection(view.id), &regex);
-            doc.set_selection(view.id, selection);
-        },
-    );
-}
-
-fn split_selection_on_newline(cx: &mut Context) {
-    let (view, doc) = current!(cx.editor);
-    let text = doc.text().slice(..);
-    let selection = selection::split_on_newline(text, doc.selection(view.id));
-    doc.set_selection(view.id, selection);
-}
-
-fn merge_selections(cx: &mut Context) {
-    let (view, doc) = current!(cx.editor);
-    let selection = doc.selection(view.id).clone().merge_ranges();
-    doc.set_selection(view.id, selection);
-}
-
-fn merge_consecutive_selections(cx: &mut Context) {
-    let (view, doc) = current!(cx.editor);
-    let selection = doc.selection(view.id).clone().merge_consecutive_ranges();
-    doc.set_selection(view.id, selection);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2006,14 +1831,6 @@ fn search_next(cx: &mut Context) {
 fn search_prev(cx: &mut Context) {
     search_next_or_prev_impl(cx, Movement::Move, Direction::Backward);
 }
-fn extend_search_next(cx: &mut Context) {
-    search_next_or_prev_impl(cx, Movement::Extend, Direction::Forward);
-}
-
-fn extend_search_prev(cx: &mut Context) {
-    search_next_or_prev_impl(cx, Movement::Extend, Direction::Backward);
-}
-
 fn search_selection(cx: &mut Context) {
     search_selection_impl(cx, false)
 }
@@ -3535,97 +3352,6 @@ fn yank_location_to_clipboard(cx: &mut Context) {
     exit_select_mode(cx);
 }
 
-fn keep_or_remove_selections_impl(cx: &mut Context, remove: bool) {
-    // keep or remove selections matching regex
-    let reg = '/';
-    ui::regex_prompt(
-        cx,
-        if remove { "remove:" } else { "keep:" }.into(),
-        Some(reg),
-        ui::completers::none,
-        move |cx, regex, event| {
-            let (view, doc) = current!(cx.editor);
-            if !matches!(event, PromptEvent::Update | PromptEvent::Validate) {
-                return;
-            }
-            let text = doc.text().slice(..);
-
-            if let Some(selection) =
-                selection::keep_or_remove_matches(text, doc.selection(view.id), &regex, remove)
-            {
-                doc.set_selection(view.id, selection);
-            } else if event == PromptEvent::Validate {
-                cx.editor.set_error("no selections remaining");
-            }
-        },
-    )
-}
-
-fn keep_selections(cx: &mut Context) {
-    keep_or_remove_selections_impl(cx, false)
-}
-
-fn remove_selections(cx: &mut Context) {
-    keep_or_remove_selections_impl(cx, true)
-}
-
-fn keep_primary_selection(cx: &mut Context) {
-    let (view, doc) = current!(cx.editor);
-    // TODO: handle count
-
-    let range = doc.selection(view.id).primary();
-    doc.set_selection(view.id, Selection::single(range.anchor, range.head));
-}
-
-fn remove_primary_selection(cx: &mut Context) {
-    let (view, doc) = current!(cx.editor);
-    // TODO: handle count
-
-    let selection = doc.selection(view.id);
-    if selection.len() == 1 {
-        cx.editor.set_error("no selections remaining");
-        return;
-    }
-    let index = selection.primary_index();
-    let selection = selection.clone().remove(index);
-
-    doc.set_selection(view.id, selection);
-}
-
-fn rotate_selections(cx: &mut Context, direction: Direction) {
-    let count = cx.count();
-    let (view, doc) = current!(cx.editor);
-    let mut selection = doc.selection(view.id).clone();
-    let index = selection.primary_index();
-    let len = selection.len();
-    selection.set_primary_index(match direction {
-        Direction::Forward => (index + count) % len,
-        Direction::Backward => (index + (len.saturating_sub(count) % len)) % len,
-    });
-    doc.set_selection(view.id, selection);
-}
-fn rotate_selections_forward(cx: &mut Context) {
-    rotate_selections(cx, Direction::Forward)
-}
-fn rotate_selections_backward(cx: &mut Context) {
-    rotate_selections(cx, Direction::Backward)
-}
-
-fn rotate_selections_first(cx: &mut Context) {
-    let (view, doc) = current!(cx.editor);
-    let mut selection = doc.selection(view.id).clone();
-    selection.set_primary_index(0);
-    doc.set_selection(view.id, selection);
-}
-
-fn rotate_selections_last(cx: &mut Context) {
-    let (view, doc) = current!(cx.editor);
-    let mut selection = doc.selection(view.id).clone();
-    let len = selection.len();
-    selection.set_primary_index(len - 1);
-    doc.set_selection(view.id, selection);
-}
-
 // tree sitter node selection
 
 fn expand_selection(cx: &mut Context) {
@@ -3736,36 +3462,6 @@ pub fn extend_parent_node_end(cx: &mut Context) {
 
 pub fn extend_parent_node_start(cx: &mut Context) {
     move_node_bound_impl(cx, Direction::Backward, Movement::Extend)
-}
-
-fn select_all_impl<F>(editor: &mut Editor, select_fn: F)
-where
-    F: Fn(&Syntax, RopeSlice, Selection) -> Selection,
-{
-    let (view, doc) = current!(editor);
-
-    if let Some(syntax) = doc.syntax() {
-        let text = doc.text().slice(..);
-        let current_selection = doc.selection(view.id);
-        let selection = select_fn(syntax, text, current_selection.clone());
-        doc.set_selection(view.id, selection);
-    }
-}
-
-fn select_all_siblings(cx: &mut Context) {
-    let motion = |editor: &mut Editor| {
-        select_all_impl(editor, object::select_all_siblings);
-    };
-
-    cx.editor.apply_motion(motion);
-}
-
-fn select_all_children(cx: &mut Context) {
-    let motion = |editor: &mut Editor| {
-        select_all_impl(editor, object::select_all_children);
-    };
-
-    cx.editor.apply_motion(motion);
 }
 
 fn match_brackets(cx: &mut Context) {
