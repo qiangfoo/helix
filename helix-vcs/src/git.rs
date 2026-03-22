@@ -12,7 +12,7 @@ use gix::dir::entry::Status;
 use gix::objs::tree::EntryKind;
 use gix::sec::trust::DefaultForLevel;
 use gix::status::{
-    index_worktree::Item,
+    index_worktree,
     plumbing::index_as_worktree::{Change, EntryStatus},
     UntrackedFiles,
 };
@@ -148,11 +148,16 @@ pub fn get_git_dir(cwd: &Path) -> Result<PathBuf> {
 }
 
 /// Emulates the result of running `git status` from the command line.
+///
+/// Reports both unstaged changes (index vs worktree) and staged changes
+/// (HEAD vs index), deduplicating files that appear in both.
 fn status(repo: &Repository, f: impl Fn(Result<FileChange>) -> bool) -> Result<()> {
     let work_dir = repo
         .workdir()
         .ok_or_else(|| anyhow::anyhow!("working tree not found"))?
         .to_path_buf();
+
+    let head_tree = repo.head_commit()?.tree_id()?.detach();
 
     let status_platform = repo
         .status(gix::progress::Discard)?
@@ -167,52 +172,101 @@ fn status(repo: &Repository, f: impl Fn(Result<FileChange>) -> bool) -> Result<(
             percentage: Some(0.5),
             limit: 1000,
             ..Default::default()
-        }));
+        }))
+        // Enable HEAD-to-index comparison to detect staged changes.
+        .head_tree(head_tree);
 
     // No filtering based on path
-    let empty_patterns = vec![];
+    let empty_patterns: Vec<gix::bstr::BString> = vec![];
 
-    let status_iter = status_platform.into_index_worktree_iter(empty_patterns)?;
+    // Track paths seen from index-worktree changes to avoid duplicates.
+    // A file that has both staged and unstaged changes will appear in both
+    // index-worktree and tree-index; we only need to report it once since
+    // get_local_diff diffs HEAD vs worktree (capturing both).
+    let mut seen_paths = std::collections::HashSet::new();
+
+    let status_iter = status_platform.into_iter(empty_patterns)?;
 
     for item in status_iter {
         let Ok(item) = item.map_err(|err| f(Err(err.into()))) else {
             continue;
         };
         let change = match item {
-            Item::Modification {
-                rela_path, status, ..
-            } => {
-                let path = work_dir.join(rela_path.to_path()?);
-                match status {
-                    EntryStatus::Conflict { .. } => FileChange::Conflict { path },
-                    EntryStatus::Change(Change::Removed) => FileChange::Deleted { path },
-                    EntryStatus::Change(Change::Modification { .. }) => {
+            gix::status::Item::IndexWorktree(iw_item) => match iw_item {
+                index_worktree::Item::Modification {
+                    rela_path, status, ..
+                } => {
+                    let path = work_dir.join(rela_path.to_path()?);
+                    let fc = match status {
+                        EntryStatus::Conflict { .. } => FileChange::Conflict { path },
+                        EntryStatus::Change(Change::Removed) => FileChange::Deleted { path },
+                        EntryStatus::Change(Change::Modification { .. }) => {
+                            FileChange::Modified { path }
+                        }
+                        EntryStatus::IntentToAdd => FileChange::Untracked { path },
+                        _ => continue,
+                    };
+                    seen_paths.insert(fc.path().to_path_buf());
+                    fc
+                }
+                index_worktree::Item::DirectoryContents { entry, .. }
+                    if entry.status == Status::Untracked =>
+                {
+                    let path = work_dir.join(entry.rela_path.to_path()?);
+                    seen_paths.insert(path.clone());
+                    FileChange::Untracked { path }
+                }
+                index_worktree::Item::Rewrite {
+                    source,
+                    dirwalk_entry,
+                    ..
+                } => {
+                    let from_path = work_dir.join(source.rela_path().to_path()?);
+                    let to_path = work_dir.join(dirwalk_entry.rela_path.to_path()?);
+                    seen_paths.insert(from_path.clone());
+                    seen_paths.insert(to_path.clone());
+                    FileChange::Renamed { from_path, to_path }
+                }
+                _ => continue,
+            },
+            gix::status::Item::TreeIndex(ti_change) => {
+                use gix::diff::index::Change as TreeIndexChange;
+                match ti_change {
+                    TreeIndexChange::Addition { location, .. } => {
+                        let path = work_dir.join(location.to_path()?);
+                        if seen_paths.contains(&path) {
+                            continue;
+                        }
+                        FileChange::Untracked { path }
+                    }
+                    TreeIndexChange::Deletion { location, .. } => {
+                        let path = work_dir.join(location.to_path()?);
+                        if seen_paths.contains(&path) {
+                            continue;
+                        }
+                        FileChange::Deleted { path }
+                    }
+                    TreeIndexChange::Modification { location, .. } => {
+                        let path = work_dir.join(location.to_path()?);
+                        if seen_paths.contains(&path) {
+                            continue;
+                        }
                         FileChange::Modified { path }
                     }
-                    // Files marked with `git add --intent-to-add`. Such files
-                    // still show up as new in `git status`, so it's appropriate
-                    // to show them the same way as untracked files in the
-                    // "changed file" picker. One example of this being used
-                    // is Jujutsu, a Git-compatible VCS. It marks all new files
-                    // with `--intent-to-add` automatically.
-                    EntryStatus::IntentToAdd => FileChange::Untracked { path },
-                    _ => continue,
+                    TreeIndexChange::Rewrite {
+                        source_location,
+                        location,
+                        ..
+                    } => {
+                        let from_path = work_dir.join(source_location.to_path()?);
+                        let to_path = work_dir.join(location.to_path()?);
+                        if seen_paths.contains(&from_path) || seen_paths.contains(&to_path) {
+                            continue;
+                        }
+                        FileChange::Renamed { from_path, to_path }
+                    }
                 }
             }
-            Item::DirectoryContents { entry, .. } if entry.status == Status::Untracked => {
-                FileChange::Untracked {
-                    path: work_dir.join(entry.rela_path.to_path()?),
-                }
-            }
-            Item::Rewrite {
-                source,
-                dirwalk_entry,
-                ..
-            } => FileChange::Renamed {
-                from_path: work_dir.join(source.rela_path().to_path()?),
-                to_path: work_dir.join(dirwalk_entry.rela_path.to_path()?),
-            },
-            _ => continue,
         };
         if !f(Ok(change)) {
             break;
