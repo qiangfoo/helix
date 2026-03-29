@@ -652,15 +652,44 @@ impl EditorView {
                 bufferline_inactive.bg(Color::Reset)
             };
 
-            let text = format!(" {} ", fname);
             let used_width = viewport.x.saturating_sub(x);
             let rem_width = surface.area.width.saturating_sub(used_width);
 
             let x_start = x;
             // Text on row 2 (bottom), indicator on row 1 (top)
-            x = surface
-                .set_stringn(x, viewport.y + 1, &text, rem_width as usize, style)
-                .0;
+            if editor.config().icons {
+                let icon = crate::ui::icons::file_icon(doc.path().unwrap_or(&scratch));
+                let icon_style = style.fg(icon.color);
+                x = surface
+                    .set_stringn(
+                        x,
+                        viewport.y + 1,
+                        &format!(" {} ", icon.icon),
+                        rem_width as usize,
+                        icon_style,
+                    )
+                    .0;
+                let rem_width = surface.area.width.saturating_sub(x);
+                x = surface
+                    .set_stringn(
+                        x,
+                        viewport.y + 1,
+                        &format!("{} ", fname),
+                        rem_width as usize,
+                        style,
+                    )
+                    .0;
+            } else {
+                x = surface
+                    .set_stringn(
+                        x,
+                        viewport.y + 1,
+                        &format!(" {} ", fname),
+                        rem_width as usize,
+                        style,
+                    )
+                    .0;
+            }
 
             tab_regions.push((x_start, x, doc.id()));
 

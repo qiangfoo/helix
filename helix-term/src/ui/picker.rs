@@ -531,7 +531,7 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
     }
 
     fn header_height(&self) -> u16 {
-        if self.columns.len() > 1 {
+        if self.columns.iter().filter(|c| c.filter).count() > 1 {
             1
         } else {
             0
@@ -885,7 +885,7 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
             .widths(&self.widths);
 
         // -- Header
-        if self.columns.len() > 1 {
+        if self.columns.iter().filter(|c| c.filter).count() > 1 {
             let active_column = self.query.active_column(self.prompt.position());
             let header_style = cx.editor.theme.get("ui.picker.header");
             let header_column_style = cx.editor.theme.get("ui.picker.header.column");
