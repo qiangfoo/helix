@@ -1262,7 +1262,11 @@ impl Application {
         //        want to try to run as much cleanup as we can, regardless of
         //        errors along the way
 
-        crate::session::save_session(&self.editor);
+        // Session is already saved by the quit commands before they clear tabs,
+        // so only save here if tabs are still populated (e.g. abnormal shutdown).
+        if !self.editor.tabs.is_empty() {
+            crate::session::save_session(&self.editor);
+        }
 
         let mut errs = Vec::new();
 
