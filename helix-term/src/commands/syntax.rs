@@ -20,7 +20,7 @@ use helix_stdx::{
 use helix_view::{
     align_view,
     document::{from_reader, SCRATCH_BUFFER_NAME},
-    Align, Document, DocumentId, Editor,
+    Align, Document, AppId, Editor,
 };
 use ignore::{DirEntry, WalkBuilder, WalkState};
 
@@ -82,14 +82,14 @@ impl TagKind {
     }
 }
 
-// NOTE: Uri is cheap to clone and DocumentId is Copy
+// NOTE: Uri is cheap to clone and AppId is Copy
 #[derive(Debug, Clone)]
-enum UriOrDocumentId {
+enum UriOrAppId {
     Uri(Uri),
-    Id(DocumentId),
+    Id(AppId),
 }
 
-impl UriOrDocumentId {
+impl UriOrAppId {
     fn path_or_id(&self) -> Option<PathOrId<'_>> {
         match self {
             Self::Id(id) => Some(PathOrId::Id(*id)),
@@ -106,14 +106,14 @@ struct Tag {
     end: usize,
     start_line: usize,
     end_line: usize,
-    doc: UriOrDocumentId,
+    doc: UriOrAppId,
 }
 
 fn tags_iter<'a>(
     syntax: &'a Syntax,
     loader: &'a Loader,
     text: RopeSlice<'a>,
-    doc: UriOrDocumentId,
+    doc: UriOrAppId,
     pattern: Option<&'a rope::Regex>,
 ) -> impl Iterator<Item = Tag> + 'a {
     let mut tags_iter = syntax.tags(text, loader, ..);
@@ -160,10 +160,10 @@ pub fn syntax_symbol_picker(cx: &mut Context) {
             .set_error("Syntax tree is not available on this buffer");
         return;
     };
-    let doc_id = doc.id();
+    let _doc_id = doc.id();
     let text = doc.text().slice(..);
     let loader = cx.editor.syn_loader.load();
-    let tags = tags_iter(syntax, &loader, text, UriOrDocumentId::Id(doc.id()), None);
+    let tags = tags_iter(syntax, &loader, text, UriOrAppId::Id(doc.id()), None);
 
     let columns = vec![
         PickerColumn::new("kind", |tag: &Tag, _| tag.kind.as_str().into()),
@@ -175,14 +175,10 @@ pub fn syntax_symbol_picker(cx: &mut Context) {
         1, // name
         tags,
         (),
-        move |cx, tag, action| {
-            cx.editor.switch(doc_id, action);
-            let view = view_mut!(cx.editor);
-            let doc = doc_mut!(cx.editor, &doc_id);
+        move |cx, tag, _action| {
+            let (view, doc) = current!(cx.editor);
             doc.set_selection(view.id, Selection::single(tag.start, tag.end));
-            if action.align_view(view, doc.id()) {
-                align_view(doc, view, Align::Center)
-            }
+            align_view(doc, view, Align::Center);
         },
     )
     .with_preview(|_editor, tag| {
@@ -256,7 +252,7 @@ pub fn syntax_workspace_symbol_picker(cx: &mut Context) {
         PickerColumn::new("name", |tag: &Tag, _| tag.name.as_str().into()).without_filtering(),
         PickerColumn::new("path", |tag: &Tag, state: &SearchState| {
             match &tag.doc {
-                UriOrDocumentId::Uri(uri) => {
+                UriOrAppId::Uri(uri) => {
                     if let Some(path) = uri.as_path() {
                         let path = if let Ok(stripped) = path.strip_prefix(&state.search_root) {
                             stripped
@@ -269,7 +265,7 @@ pub fn syntax_workspace_symbol_picker(cx: &mut Context) {
                     }
                 }
                 // This picker only uses `Id` for scratch buffers for better display.
-                UriOrDocumentId::Id(_) => SCRATCH_BUFFER_NAME.into(),
+                UriOrAppId::Id(_) => SCRATCH_BUFFER_NAME.into(),
             }
         }),
     ];
@@ -287,13 +283,13 @@ pub fn syntax_workspace_symbol_picker(cx: &mut Context) {
             Err(err) => return async { Err(anyhow::anyhow!(err)) }.boxed(),
         };
         let loader = editor.syn_loader.load();
-        for doc in editor.documents() {
+        for doc in std::iter::once(&editor.tabs[editor.active_tab].doc) {
             let Some(syntax) = doc.syntax() else { continue };
             let text = doc.text().slice(..);
             let uri_or_id = doc
                 .uri()
-                .map(UriOrDocumentId::Uri)
-                .unwrap_or_else(|| UriOrDocumentId::Id(doc.id()));
+                .map(UriOrAppId::Uri)
+                .unwrap_or_else(|| UriOrAppId::Id(doc.id()));
             for tag in tags_iter(syntax, &loader, text.slice(..), uri_or_id, Some(&pattern)) {
                 if injector.push(tag).is_err() {
                     return async { Ok(()) }.boxed();
@@ -321,8 +317,7 @@ pub fn syntax_workspace_symbol_picker(cx: &mut Context) {
         let pattern = Arc::new(pattern);
         let injector = injector.clone();
         let loader = editor.syn_loader.load();
-        let documents: HashSet<_> = editor
-            .documents()
+        let documents: HashSet<_> = std::iter::once(&editor.tabs[editor.active_tab].doc)
             .filter_map(Document::path)
             .cloned()
             .collect();
@@ -367,7 +362,7 @@ pub fn syntax_workspace_symbol_picker(cx: &mut Context) {
                             syntax,
                             &loader,
                             text.slice(..),
-                            UriOrDocumentId::Uri(uri),
+                            UriOrAppId::Uri(uri),
                             Some(&pattern),
                         ) {
                             if injector.push(tag).is_err() {
@@ -400,29 +395,37 @@ pub fn syntax_workspace_symbol_picker(cx: &mut Context) {
         1, // name
         [],
         state,
-        move |cx, tag, action| {
-            let doc_id = match &tag.doc {
-                UriOrDocumentId::Id(id) => *id,
-                UriOrDocumentId::Uri(uri) => match cx.editor.open(uri.as_path().expect(""), action) {
-                    Ok(id) => id,
+        move |cx, tag, _action| {
+            if let UriOrAppId::Uri(uri) = &tag.doc {
+                match Document::open(
+                    uri.as_path().expect("URIs are valid paths"),
+                    None,
+                    true,
+                    cx.editor.config.clone(),
+                    cx.editor.syn_loader.clone(),
+                ) {
+                    Ok(mut doc) => {
+                        let view_id = cx.editor.tabs[cx.editor.active_tab].tree.focus;
+                        let view_id = cx.editor.tabs[cx.editor.active_tab].tree.get(view_id).id;
+                        doc.ensure_view_init(view_id);
+                        cx.editor.tabs[cx.editor.active_tab].doc = doc;
+                        cx.editor.launch_language_servers(cx.editor.tabs[cx.editor.active_tab].doc.id());
+                    }
                     Err(e) => {
                         cx.editor
                             .set_error(format!("Failed to open file '{uri:?}': {e}"));
                         return;
                     }
                 }
-            };
-            let doc = doc_mut!(cx.editor, &doc_id);
-            let view = view_mut!(cx.editor);
+            }
+            let (view, doc) = current!(cx.editor);
             let len_chars = doc.text().len_chars();
             if tag.start >= len_chars || tag.end > len_chars {
                 cx.editor.set_error("The location you jumped to does not exist anymore because the file has changed.");
                 return;
             }
             doc.set_selection(view.id, Selection::single(tag.start, tag.end));
-            if action.align_view(view, doc.id()) {
-                align_view(doc, view, Align::Center)
-            }
+            align_view(doc, view, Align::Center);
         },
     )
     .with_dynamic_query(get_tags, Some(275))

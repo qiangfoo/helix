@@ -8,7 +8,7 @@ use helix_view::{
     document::DocumentColorSwatches,
     events::{DocumentDidChange, DocumentDidOpen, LanguageServerExited, LanguageServerInitialized},
     handlers::{lsp::DocumentColorsEvent, Handlers},
-    DocumentId, Editor, Theme,
+    AppId, Editor, Theme,
 };
 use tokio::time::Instant;
 
@@ -16,7 +16,7 @@ use crate::job;
 
 #[derive(Default)]
 pub(super) struct DocumentColorsHandler {
-    docs: HashSet<DocumentId>,
+    docs: HashSet<AppId>,
 }
 
 const DOCUMENT_CHANGE_DEBOUNCE: Duration = Duration::from_millis(250);
@@ -41,16 +41,17 @@ impl helix_event::AsyncHook for DocumentColorsHandler {
     }
 }
 
-fn request_document_colors(editor: &mut Editor, doc_id: DocumentId) {
+fn request_document_colors(editor: &mut Editor, doc_id: AppId) {
     if !editor.config().lsp.display_color_swatches {
         return;
     }
 
-    let Some(doc) = editor.document_mut(doc_id) else {
+    if editor.tabs[editor.active_tab].doc.id() != doc_id {
         return;
-    };
+    }
 
-    let cancel = doc.color_swatch_controller.restart();
+    let cancel = editor.tabs[editor.active_tab].doc.color_swatch_controller.restart();
+    let doc = &editor.tabs[editor.active_tab].doc;
 
     let mut seen_language_servers = HashSet::new();
     let mut futures: FuturesOrdered<_> = doc
@@ -102,16 +103,17 @@ fn request_document_colors(editor: &mut Editor, doc_id: DocumentId) {
 
 fn attach_document_colors(
     editor: &mut Editor,
-    doc_id: DocumentId,
+    doc_id: AppId,
     mut doc_colors: Vec<(usize, lsp::Color)>,
 ) {
     if !editor.config().lsp.display_color_swatches {
         return;
     }
 
-    let Some(doc) = editor.documents.get_mut(&doc_id) else {
+    if editor.tabs[editor.active_tab].doc.id() != doc_id {
         return;
-    };
+    }
+    let doc = &mut editor.tabs[editor.active_tab].doc;
 
     if doc_colors.is_empty() {
         doc.color_swatches.take();
@@ -184,28 +186,20 @@ pub(super) fn register_hooks(handlers: &Handlers) {
     });
 
     register_hook!(move |event: &mut LanguageServerInitialized<'_>| {
-        let doc_ids: Vec<_> = event.editor.documents().map(|doc| doc.id()).collect();
-
-        for doc_id in doc_ids {
-            request_document_colors(event.editor, doc_id);
-        }
+        let doc_id = event.editor.tabs[event.editor.active_tab].doc.id();
+        request_document_colors(event.editor, doc_id);
 
         Ok(())
     });
 
     register_hook!(move |event: &mut LanguageServerExited<'_>| {
-        // Clear and re-request all color swatches when a server exits.
-        for doc in event.editor.documents_mut() {
-            if doc.supports_language_server(event.server_id) {
-                doc.color_swatches.take();
-            }
+        // Clear and re-request color swatches when a server exits.
+        if event.editor.tabs[event.editor.active_tab].doc.supports_language_server(event.server_id) {
+            event.editor.tabs[event.editor.active_tab].doc.color_swatches.take();
         }
 
-        let doc_ids: Vec<_> = event.editor.documents().map(|doc| doc.id()).collect();
-
-        for doc_id in doc_ids {
-            request_document_colors(event.editor, doc_id);
-        }
+        let doc_id = event.editor.tabs[event.editor.active_tab].doc.id();
+        request_document_colors(event.editor, doc_id);
 
         Ok(())
     });

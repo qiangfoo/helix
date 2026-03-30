@@ -7,7 +7,7 @@ use helix_event::register_hook;
 use helix_view::document::DiffSource;
 use helix_view::events::{DocumentDidClose, DocumentDidOpen};
 use helix_view::handlers::{FileWatcherCommand, Handlers};
-use helix_view::{DocumentId, Editor};
+use helix_view::{AppId, Editor};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc::{self, Sender};
 
@@ -144,32 +144,31 @@ fn dispatch_reloads(paths: Vec<PathBuf>) {
         let scrolloff = editor.config().scrolloff;
 
         for path in &paths {
-            let doc_id = match editor.document_id_by_path(path) {
-                Some(id) => id,
-                None => {
-                    log::debug!("file_watcher: no document found for path {:?}", path);
-                    continue;
-                }
-            };
+            // Check if the current document matches this path
+            let doc_path = editor.tabs[editor.active_tab].doc.path().cloned();
+            if doc_path.as_deref() != Some(path.as_path()) {
+                log::debug!("file_watcher: no document found for path {:?}", path);
+                continue;
+            }
 
-            let doc = editor.documents.get(&doc_id).unwrap();
-            let view_ids: Vec<_> = doc.selections().keys().cloned().collect();
+            let view_ids: Vec<_> = editor.tabs[editor.active_tab].doc.selections().keys().cloned().collect();
             if view_ids.is_empty() {
                 continue;
             }
 
-            // Use direct field access to avoid borrow conflicts
-            let doc = editor.documents.get_mut(&doc_id).unwrap();
-            let view = editor.tree.get_mut(view_ids[0]);
-            view.sync_changes(doc);
+            {
+                let dv = &mut editor.tabs[editor.active_tab];
+                let view = dv.tree.get_mut(view_ids[0]);
+                view.sync_changes(&mut dv.doc);
 
-            let diff_providers = &editor.diff_providers;
-            if let Err(error) = doc.reload(view, diff_providers) {
-                log::warn!("Failed to reload {:?}: {}", path, error);
-                continue;
+                let diff_providers = &editor.diff_providers;
+                if let Err(error) = dv.doc.reload(dv.tree.get_mut(view_ids[0]), diff_providers) {
+                    log::warn!("Failed to reload {:?}: {}", path, error);
+                    continue;
+                }
             }
 
-            if let Some(path) = editor.documents.get(&doc_id).and_then(|d| d.path().cloned()) {
+            if let Some(path) = editor.tabs[editor.active_tab].doc.path().cloned() {
                 editor
                     .language_servers
                     .file_event_handler
@@ -177,17 +176,13 @@ fn dispatch_reloads(paths: Vec<PathBuf>) {
             }
 
             for &view_id in &view_ids {
-                let doc = editor.documents.get_mut(&doc_id).unwrap();
-                let view = editor.tree.get_mut(view_id);
-                if view.doc == doc_id {
-                    view.ensure_cursor_in_view(doc, scrolloff);
-                }
+                let dv = &mut editor.tabs[editor.active_tab];
+                let view = dv.tree.get_mut(view_id);
+                view.ensure_cursor_in_view(&mut dv.doc, scrolloff);
             }
 
-            let name = editor
-                .documents
-                .get(&doc_id)
-                .and_then(|d| d.path())
+            let name = editor.tabs[editor.active_tab].doc
+                .path()
                 .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
@@ -200,8 +195,7 @@ fn dispatch_diff_refreshes() {
     job::dispatch_blocking(move |editor, _compositor| {
         let diff_providers = editor.diff_providers.clone();
 
-        let diff_docs: Vec<(DocumentId, DiffSource)> = editor
-            .documents()
+        let diff_docs: Vec<(AppId, DiffSource)> = std::iter::once(&editor.tabs[editor.active_tab].doc)
             .filter_map(|doc| doc.diff_source.as_ref().map(|src| (doc.id(), src.clone())))
             .collect();
 
@@ -211,7 +205,7 @@ fn dispatch_diff_refreshes() {
 
         // Regenerate diffs in a blocking background task
         tokio::task::spawn_blocking(move || {
-            let results: Vec<(DocumentId, String)> = diff_docs
+            let results: Vec<(AppId, String)> = diff_docs
                 .into_iter()
                 .filter_map(|(id, source)| {
                     let text = match &source {
@@ -236,28 +230,25 @@ fn dispatch_diff_refreshes() {
     });
 }
 
-fn apply_diff_update(editor: &mut Editor, doc_id: DocumentId, new_text: &str, scrolloff: usize) {
-    let doc = match editor.documents.get_mut(&doc_id) {
-        Some(d) => d,
-        None => return,
-    };
+fn apply_diff_update(editor: &mut Editor, doc_id: AppId, new_text: &str, scrolloff: usize) {
+    if editor.tabs[editor.active_tab].doc.id() != doc_id {
+        return;
+    }
 
     let new_rope = Rope::from(new_text);
-    let transaction = helix_core::diff::compare_ropes(doc.text(), &new_rope);
+    let transaction = helix_core::diff::compare_ropes(editor.tabs[editor.active_tab].doc.text(), &new_rope);
     if transaction.changes().is_empty() {
         return;
     }
 
-    let view_ids: Vec<_> = doc.selections().keys().cloned().collect();
+    let view_ids: Vec<_> = editor.tabs[editor.active_tab].doc.selections().keys().cloned().collect();
     if let Some(&view_id) = view_ids.first() {
-        doc.apply(&transaction, view_id);
+        editor.tabs[editor.active_tab].doc.apply(&transaction, view_id);
 
         for &vid in &view_ids {
-            let doc = editor.documents.get_mut(&doc_id).unwrap();
-            let view = editor.tree.get_mut(vid);
-            if view.doc == doc_id {
-                view.ensure_cursor_in_view(doc, scrolloff);
-            }
+            let dv = &mut editor.tabs[editor.active_tab];
+            let view = dv.tree.get_mut(vid);
+            view.ensure_cursor_in_view(&mut dv.doc, scrolloff);
         }
     }
 }
@@ -265,7 +256,7 @@ fn apply_diff_update(editor: &mut Editor, doc_id: DocumentId, new_text: &str, sc
 pub fn register_hooks(handlers: &Handlers) {
     let tx = handlers.file_watcher.clone();
     register_hook!(move |event: &mut DocumentDidOpen<'_>| {
-        let doc = event.editor.document(event.doc).unwrap();
+        let doc = &event.editor.tabs[event.editor.active_tab].doc;
         if let Some(path) = doc.path().cloned() {
             helix_event::send_blocking(&tx, FileWatcherCommand::Watch { path });
         }

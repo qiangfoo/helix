@@ -1,20 +1,19 @@
 use arc_swap::{access::Map, ArcSwap};
 use futures_util::Stream;
-use helix_core::{diagnostic::Severity, pos_at_coords, syntax, Range, Selection};
+use helix_core::{diagnostic::Severity, syntax, Selection};
 use helix_lsp::{
     lsp::{self, notification::Notification},
     util::lsp_range_to_range,
     LanguageServerId, LspProgressMap,
 };
-use helix_stdx::path::get_relative_path;
+// get_relative_path is no longer used after removing document write handling
 use helix_view::{
     align_view,
-    document::{DocumentOpenError, DocumentSavedEventResult},
+    document::DocumentOpenError,
     editor::{ConfigEvent, EditorEvent},
     graphics::Rect,
     theme,
-    tree::Layout,
-    Align, Editor,
+    Align, Document, Editor,
 };
 use serde_json::json;
 use tui::backend::Backend;
@@ -25,11 +24,10 @@ use crate::{
     config::Config,
     handlers,
     job::Jobs,
-    keymap::Keymaps,
     ui::{self, overlay::overlaid},
 };
 
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use std::{
     io::{stdin, IsTerminal},
     path::Path,
@@ -108,7 +106,6 @@ impl Application {
         #[cfg(feature = "integration")]
         setup_integration_logging();
 
-        use helix_view::editor::Action;
 
         let mut theme_parent_dirs = vec![helix_loader::config_dir()];
         theme_parent_dirs.extend(helix_loader::runtime_dirs().iter().cloned());
@@ -140,104 +137,80 @@ impl Application {
         );
         Self::load_configured_theme(&mut editor, &config.load(), &mut terminal, theme_mode);
 
-        let keys = Box::new(Map::new(Arc::clone(&config), |config: &Config| {
-            &config.keys
-        }));
-        let editor_view = Box::new(ui::EditorView::new(Keymaps::new(keys)));
-        compositor.push(editor_view);
+        let tab_manager = ui::TabManager::new(Arc::clone(&config));
+        // Initial tab will be created after files are opened below.
+        compositor.push(Box::new(tab_manager));
 
         let jobs = Jobs::new();
 
+        // Helper to create a Document from a path
+        let open_doc = |path: &Path, editor: &Editor| -> Result<Document, DocumentOpenError> {
+            Document::open(
+                path,
+                None,
+                true,
+                editor.config.clone(),
+                editor.syn_loader.clone(),
+            )
+        };
+
+        // Collect documents and an optional picker to push
+        let mut docs_to_open: Vec<Document> = Vec::new();
+        let mut picker_to_push: Option<Box<dyn crate::compositor::Component>> = None;
+
         if args.load_tutor {
             let path = helix_loader::runtime_file(Path::new("tutor"));
-            editor.open(&path, Action::VerticalSplit)?;
-            // Unset path to prevent accidentally saving to the original tutor file.
-            doc_mut!(editor).set_path(None);
+            let mut doc = open_doc(&path, &editor)?;
+            doc.set_path(None);
+            docs_to_open.push(doc);
         } else if !args.files.is_empty() {
             let mut files_it = args.files.into_iter().peekable();
 
             // If the first file is a directory, skip it and open a picker
             if let Some((first, _)) = files_it.next_if(|(p, _)| p.is_dir()) {
                 let picker = ui::file_picker(&editor, first);
-                compositor.push(Box::new(overlaid(picker)));
+                picker_to_push = Some(Box::new(overlaid(picker)));
             }
 
-            // If there are any more files specified, open them
             if files_it.peek().is_some() {
                 let mut nr_of_files = 0;
-                for (file, pos) in files_it {
-                    nr_of_files += 1;
+                for (file, _pos) in files_it {
                     if file.is_dir() {
                         return Err(anyhow::anyhow!(
                             "expected a path to file, but found a directory: {file:?}. (to open a directory pass it as first argument)"
                         ));
-                    } else {
-                        // If the user passes in either `--vsplit` or
-                        // `--hsplit` as a command line argument, all the given
-                        // files will be opened according to the selected
-                        // option. If neither of those two arguments are passed
-                        // in, just load the files normally.
-                        let action = match args.split {
-                            _ if nr_of_files == 1 => Action::VerticalSplit,
-                            Some(Layout::Vertical) => Action::VerticalSplit,
-                            Some(Layout::Horizontal) => Action::HorizontalSplit,
-                            None => Action::Load,
-                        };
-                        let old_id = editor.document_id_by_path(&file);
-                        let doc_id = match editor.open(&file, action) {
-                            // Ignore irregular files during application init.
-                            Err(DocumentOpenError::IrregularFile) => {
-                                nr_of_files -= 1;
-                                continue;
-                            }
-                            Err(err) => return Err(anyhow::anyhow!(err)),
-                            // We can't open more than 1 buffer for 1 file, in this case we already have opened this file previously
-                            Ok(doc_id) if old_id == Some(doc_id) => {
-                                nr_of_files -= 1;
-                                doc_id
-                            }
-                            Ok(doc_id) => doc_id,
-                        };
-                        // with Action::Load all documents have the same view
-                        // NOTE: this isn't necessarily true anymore. If
-                        // `--vsplit` or `--hsplit` are used, the file which is
-                        // opened last is focused on.
-                        let view_id = editor.tree.focus;
-                        let doc = doc_mut!(editor, &doc_id);
-                        let selection = pos
-                            .into_iter()
-                            .map(|coords| {
-                                Range::point(pos_at_coords(doc.text().slice(..), coords, true))
-                            })
-                            .collect();
-                        doc.set_selection(view_id, selection);
+                    }
+                    match open_doc(&file, &editor) {
+                        Err(DocumentOpenError::IrregularFile) => continue,
+                        Err(err) => return Err(anyhow::anyhow!(err)),
+                        Ok(doc) => {
+                            nr_of_files += 1;
+                            docs_to_open.push(doc);
+                        }
                     }
                 }
 
-                // if all files were invalid, replace with empty buffer
                 if nr_of_files == 0 {
-                    editor.new_file(Action::VerticalSplit);
+                    docs_to_open.push(Document::default(editor.config.clone(), editor.syn_loader.clone()));
                 } else {
                     editor.set_status(format!(
                         "Loaded {} file{}.",
                         nr_of_files,
-                        if nr_of_files == 1 { "" } else { "s" } // avoid "Loaded 1 files." grammo
+                        if nr_of_files == 1 { "" } else { "s" }
                     ));
-                    // align the view to center after all files are loaded,
-                    // does not affect views without pos since it is at the top
-                    let (view, doc) = current!(editor);
-                    align_view(doc, view, Align::Center);
                 }
             } else {
-                editor.new_file(Action::VerticalSplit);
+                docs_to_open.push(Document::default(editor.config.clone(), editor.syn_loader.clone()));
             }
         } else if stdin().is_terminal() || cfg!(feature = "integration") {
             if let Some(session_files) = crate::session::load_session() {
                 let mut nr_of_files = 0;
                 for file in &session_files {
-                    let action = if nr_of_files == 0 { Action::VerticalSplit } else { Action::Load };
-                    match editor.open(file, action) {
-                        Ok(_) => nr_of_files += 1,
+                    match open_doc(file, &editor) {
+                        Ok(doc) => {
+                            nr_of_files += 1;
+                            docs_to_open.push(doc);
+                        }
                         Err(err) => log::warn!("Failed to restore session file {}: {err}", file.display()),
                     }
                 }
@@ -248,15 +221,30 @@ impl Application {
                         if nr_of_files == 1 { "" } else { "s" }
                     ));
                 } else {
-                    editor.new_file(Action::VerticalSplit);
+                    docs_to_open.push(Document::default(editor.config.clone(), editor.syn_loader.clone()));
                 }
             } else {
-                editor.new_file(Action::VerticalSplit);
+                docs_to_open.push(Document::default(editor.config.clone(), editor.syn_loader.clone()));
             }
         } else {
-            editor
-                .new_file_from_stdin(Action::VerticalSplit)
-                .unwrap_or_else(|_| editor.new_file(Action::VerticalSplit));
+            docs_to_open.push(Document::default(editor.config.clone(), editor.syn_loader.clone()));
+        }
+
+        // Add all documents as tabs
+        {
+            let tab_manager = compositor.find::<ui::TabManager>().unwrap();
+            for doc in docs_to_open {
+                tab_manager.new_editor_tab(doc, &mut editor);
+            }
+            if tab_manager.tab_count() > 0 {
+                tab_manager.activate_tab(0);
+                editor.active_tab = 0;
+            }
+        }
+
+        // Push the picker on top if needed
+        if let Some(picker) = picker_to_push {
+            compositor.push(picker);
         }
 
         #[cfg(windows)]
@@ -312,7 +300,7 @@ impl Application {
         self.compositor.render(area, surface, &mut cx);
         let (pos, kind) = self.compositor.cursor(area, &self.editor);
         // reset cursor cache
-        self.editor.cursor_cache.reset();
+        self.editor.tabs[self.editor.active_tab].cursor_cache.reset();
 
         let pos = pos.map(|pos| (pos.col as u16, pos.row as u16));
         self.terminal.draw(pos, kind).unwrap();
@@ -427,9 +415,11 @@ impl Application {
 
         // reset view position in case softwrap was enabled/disabled
         let scrolloff = self.editor.config().scrolloff;
-        for (view, _) in self.editor.tree.views() {
-            let doc = doc_mut!(self.editor, &view.doc);
-            view.ensure_cursor_in_view(doc, scrolloff);
+        {
+            let dv = &mut self.editor.tabs[self.editor.active_tab];
+            for (view, _) in dv.tree.views() {
+                view.ensure_cursor_in_view(&mut dv.doc, scrolloff);
+            }
         }
     }
 
@@ -450,9 +440,10 @@ impl Application {
                 self.theme_mode,
             );
 
-            // Re-parse any open documents with the new language config.
-            let lang_loader = self.editor.syn_loader.load();
-            for document in self.editor.documents.values_mut() {
+            // Re-parse the open document with the new language config.
+            {
+                let lang_loader = self.editor.syn_loader.load();
+                let document = &mut self.editor.tabs[self.editor.active_tab].doc;
                 // Re-detect .editorconfig
                 document.detect_editor_config();
                 document.detect_language(&lang_loader);
@@ -608,83 +599,14 @@ impl Application {
         }
     }
 
-    pub fn handle_document_write(&mut self, doc_save_event: DocumentSavedEventResult) {
-        let doc_save_event = match doc_save_event {
-            Ok(event) => event,
-            Err(err) => {
-                self.editor.set_error(err.to_string());
-                return;
-            }
-        };
-
-        let doc = match self.editor.document_mut(doc_save_event.doc_id) {
-            None => {
-                warn!(
-                    "received document saved event for non-existent doc id: {}",
-                    doc_save_event.doc_id
-                );
-
-                return;
-            }
-            Some(doc) => doc,
-        };
-
-        debug!(
-            "document {:?} saved with revision {}",
-            doc.path(),
-            doc_save_event.revision
-        );
-
-        doc.set_last_saved_revision(doc_save_event.revision, doc_save_event.save_time);
-
-        let lines = doc_save_event.text.len_lines();
-        let size = doc_save_event.text.len_bytes();
-
-        enum Size {
-            Bytes(u16),
-            HumanReadable(f32, &'static str),
-        }
-
-        impl std::fmt::Display for Size {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                match self {
-                    Self::Bytes(bytes) => write!(f, "{bytes}B"),
-                    Self::HumanReadable(size, suffix) => write!(f, "{size:.1}{suffix}"),
-                }
-            }
-        }
-
-        let size = if size < 1024 {
-            Size::Bytes(size as u16)
-        } else {
-            const SUFFIX: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
-            let mut size = size as f32;
-            let mut i = 0;
-            while i < SUFFIX.len() - 1 && size >= 1024.0 {
-                size /= 1024.0;
-                i += 1;
-            }
-            Size::HumanReadable(size, SUFFIX[i])
-        };
-
-        self.editor
-            .set_doc_path(doc_save_event.doc_id, &doc_save_event.path);
-        // TODO: fix being overwritten by lsp
-        self.editor.set_status(format!(
-            "'{}' written, {lines}L {size}",
-            get_relative_path(&doc_save_event.path).to_string_lossy(),
-        ));
-    }
+    // Document writes are not supported in the read-only viewer.
+    // This method is kept as a no-op stub.
 
     #[inline(always)]
     pub async fn handle_editor_event(&mut self, event: EditorEvent) -> bool {
         log::debug!("received editor event: {:?}", event);
 
         match event {
-            EditorEvent::DocumentSaved(event) => {
-                self.handle_document_write(event);
-                self.render().await;
-            }
             EditorEvent::ConfigEvent(event) => {
                 self.handle_config_events(event);
                 self.render().await;
@@ -866,9 +788,12 @@ impl Application {
                             .compositor
                             .has_component(std::any::type_name::<ui::Prompt>()) =>
                     {
-                        let editor_view = self
+                        let tab_manager = self
                             .compositor
-                            .find::<ui::EditorView>()
+                            .find::<ui::TabManager>()
+                            .expect("expected TabManager");
+                        let editor_view = tab_manager
+                            .editor_view()
                             .expect("expected at least one EditorView");
                         let lsp::ProgressParams {
                             token,
@@ -958,10 +883,8 @@ impl Application {
 
                         self.editor.diagnostics.retain(|_, diags| !diags.is_empty());
 
-                        // Clear any diagnostics for documents with this server open.
-                        for doc in self.editor.documents_mut() {
-                            doc.clear_diagnostics_for_language_server(server_id);
-                        }
+                        // Clear any diagnostics for the document with this server open.
+                        self.editor.tabs[self.editor.active_tab].doc.clear_diagnostics_for_language_server(server_id);
 
                         helix_event::dispatch(helix_view::events::LanguageServerExited {
                             editor: &mut self.editor,
@@ -1004,9 +927,12 @@ impl Application {
                     Ok(MethodCall::WorkDoneProgressCreate(params)) => {
                         self.lsp_progress.create(server_id, params.token);
 
-                        let editor_view = self
+                        let tab_manager = self
                             .compositor
-                            .find::<ui::EditorView>()
+                            .find::<ui::TabManager>()
+                            .expect("expected TabManager");
+                        let editor_view = tab_manager
+                            .editor_view()
                             .expect("expected at least one EditorView");
                         let spinner = editor_view.spinners_mut().get_or_create(server_id);
                         if spinner.is_stopped() {
@@ -1127,18 +1053,11 @@ impl Application {
                     Ok(MethodCall::WorkspaceDiagnosticRefresh) => {
                         let language_server = language_server!().id();
 
-                        let documents: Vec<_> = self
-                            .editor
-                            .documents
-                            .values()
-                            .filter(|x| x.supports_language_server(language_server))
-                            .map(|x| x.id())
-                            .collect();
-
-                        for document in documents {
+                        if self.editor.tabs[self.editor.active_tab].doc.supports_language_server(language_server) {
+                            let doc_id = self.editor.tabs[self.editor.active_tab].doc.id();
                             handlers::diagnostics::request_document_diagnostics(
                                 &mut self.editor,
-                                document,
+                                doc_id,
                             );
                         }
 
@@ -1222,7 +1141,7 @@ impl Application {
         let lsp::ShowDocumentParams {
             uri,
             selection,
-            take_focus,
+            take_focus: _,
             ..
         } = params;
 
@@ -1236,31 +1155,32 @@ impl Application {
         // If `Uri` gets another variant other than `Path` this may not be valid.
         let path = uri.as_path().expect("URIs are valid paths");
 
-        let action = match take_focus {
-            Some(true) => helix_view::editor::Action::Replace,
-            _ => helix_view::editor::Action::VerticalSplit,
-        };
-
-        let doc_id = match self.editor.open(path, action) {
-            Ok(id) => id,
+        let doc = match Document::open(
+            path,
+            None,
+            true,
+            self.editor.config.clone(),
+            self.editor.syn_loader.clone(),
+        ) {
+            Ok(doc) => doc,
             Err(err) => {
                 log::error!("failed to open path: {:?}: {:?}", uri, err);
                 return lsp::ShowDocumentResult { success: false };
             }
         };
 
-        let doc = doc_mut!(self.editor, &doc_id);
-        if let Some(range) = selection {
-            // TODO: convert inside server
-            if let Some(new_range) = lsp_range_to_range(doc.text(), range, offset_encoding) {
-                let view = view_mut!(self.editor);
+        // Add the document as a new tab
+        let tab_manager = self
+            .compositor
+            .find::<ui::TabManager>()
+            .expect("expected TabManager");
+        tab_manager.new_editor_tab(doc, &mut self.editor);
 
-                // we flip the range so that the cursor sits on the start of the symbol
-                // (for example start of the function).
+        if let Some(range) = selection {
+            let (view, doc) = current!(self.editor);
+            if let Some(new_range) = lsp_range_to_range(doc.text(), range, offset_encoding) {
                 doc.set_selection(view.id, Selection::single(new_range.head, new_range.anchor));
-                if action.align_view(view, doc.id()) {
-                    align_view(doc, view, Align::Center);
-                }
+                align_view(doc, view, Align::Center);
             } else {
                 log::warn!("lsp position out of bounds - {:?}", range);
             };
@@ -1354,11 +1274,6 @@ impl Application {
             log::error!("Error executing job: {}", err);
             errs.push(err);
         };
-
-        if let Err(err) = self.editor.flush_writes().await {
-            log::error!("Error writing: {}", err);
-            errs.push(err);
-        }
 
         if self.editor.close_language_servers(None).await.is_err() {
             log::error!("Timed out waiting for language servers to shutdown");

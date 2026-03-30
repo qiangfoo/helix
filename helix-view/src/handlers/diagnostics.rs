@@ -1,5 +1,4 @@
 use std::cell::Cell;
-use std::num::NonZeroUsize;
 use std::sync::atomic::{self, AtomicUsize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,7 +7,7 @@ use helix_event::{request_redraw, send_blocking, AsyncHook};
 use tokio::sync::mpsc::Sender;
 use tokio::time::Instant;
 
-use crate::{Document, DocumentId, ViewId};
+use crate::{Document, AppId, ViewId};
 
 #[derive(Debug)]
 pub enum DiagnosticEvent {
@@ -57,7 +56,7 @@ impl AsyncHook for DiagnosticTimeout {
 pub struct DiagnosticsHandler {
     active_generation: Arc<AtomicUsize>,
     generation: Cell<usize>,
-    last_doc: Cell<DocumentId>,
+    last_doc: Cell<AppId>,
     last_cursor_line: Cell<usize>,
     pub active: bool,
     pub events: Sender<DiagnosticEvent>,
@@ -86,7 +85,7 @@ impl DiagnosticsHandler {
             active_generation,
             generation: Cell::new(0),
             events,
-            last_doc: Cell::new(DocumentId(NonZeroUsize::new(usize::MAX).unwrap())),
+            last_doc: Cell::new(AppId(u64::MAX)),
             last_cursor_line: Cell::new(usize::MAX),
             active: true,
         }

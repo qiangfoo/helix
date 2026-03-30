@@ -3,6 +3,7 @@ pub mod macros;
 
 pub mod annotations;
 pub mod clipboard;
+pub mod doc_view;
 pub mod document;
 pub mod editor;
 pub mod events;
@@ -18,19 +19,27 @@ pub mod theme;
 pub mod tree;
 pub mod view;
 
-use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-// uses NonZeroUsize so Option<DocumentId> use a byte rather than two
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct DocumentId(NonZeroUsize);
+/// Unique identifier for an application tab / document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AppId(u64);
 
-impl Default for DocumentId {
-    fn default() -> DocumentId {
-        DocumentId(NonZeroUsize::new(1).unwrap())
+static NEXT_APP_ID: AtomicU64 = AtomicU64::new(1);
+
+impl AppId {
+    pub fn next() -> Self {
+        Self(NEXT_APP_ID.fetch_add(1, Ordering::Relaxed))
     }
 }
 
-impl std::fmt::Display for DocumentId {
+impl Default for AppId {
+    fn default() -> AppId {
+        AppId::next()
+    }
+}
+
+impl std::fmt::Display for AppId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!("{}", self.0))
     }
@@ -71,6 +80,7 @@ pub fn align_view(doc: &mut Document, view: &View, align: Align) {
     doc.set_view_offset(view.id, view_offset);
 }
 
+pub use doc_view::DocView;
 pub use document::Document;
 pub use editor::Editor;
 use helix_core::char_idx_at_visual_offset;

@@ -18,7 +18,6 @@ use helix_core::{
     movement::Direction,
     syntax::{self, OverlayHighlights},
     text_annotations::TextAnnotations,
-    unicode::width::UnicodeWidthStr,
     visual_offset_from_block, Position, Range, Selection,
 };
 use helix_view::{
@@ -28,32 +27,33 @@ use helix_view::{
     graphics::{Color, CursorKind, Rect, Style},
     input::{KeyEvent, MouseButton, MouseEvent, MouseEventKind},
     keyboard::{KeyCode, KeyModifiers},
-    Document, DocumentId, Editor, Theme, View,
+    Document, Editor, Theme, View,
 };
 use std::{mem::take, num::NonZeroUsize, ops, path::PathBuf, rc::Rc};
 
 use tui::{buffer::Buffer as Surface, text::Span};
 
 pub struct EditorView {
+    app_id: crate::ui::app::AppId,
+    pub tab_index: usize,
     pub keymaps: Keymaps,
     on_next_key: Option<(OnKeyCallback, OnKeyCallbackKind)>,
     pseudo_pending: Vec<KeyEvent>,
     spinners: ProgressSpinners,
     /// Tracks if the terminal window is focused by reaction to terminal focus events
     terminal_focused: bool,
-    /// Tab regions for mouse click handling: (x_start, x_end, document_id)
-    tab_regions: Vec<(u16, u16, DocumentId)>,
 }
 
 impl EditorView {
-    pub fn new(keymaps: Keymaps) -> Self {
+    pub fn new(keymaps: Keymaps, tab_index: usize) -> Self {
         Self {
+            app_id: crate::ui::app::AppId::next(),
+            tab_index,
             keymaps,
             on_next_key: None,
             pseudo_pending: Vec::new(),
             spinners: ProgressSpinners::default(),
             terminal_focused: true,
-            tab_regions: Vec::new(),
         }
     }
 
@@ -158,7 +158,7 @@ impl EditorView {
             .cursor(doc.text().slice(..));
         if is_focused {
             decorations.add_decoration(text_decorations::Cursor {
-                cache: &editor.cursor_cache,
+                cache: &editor.tabs[editor.active_tab].cursor_cache,
                 primary_cursor,
             });
         }
@@ -612,76 +612,6 @@ impl EditorView {
         Some(OverlayHighlights::single(highlight, pos..pos + 1))
     }
 
-    /// Render bufferline at the top (2 lines: tabs + underline indicator)
-    pub fn render_bufferline(
-        editor: &Editor,
-        viewport: Rect,
-        surface: &mut Surface,
-    ) -> Vec<(u16, u16, DocumentId)> {
-        let scratch = PathBuf::from(SCRATCH_BUFFER_NAME);
-
-        let bufferline_active = editor
-            .theme
-            .try_get("ui.bufferline.active")
-            .unwrap_or_else(|| editor.theme.get("ui.statusline.active"));
-
-        let bufferline_inactive = editor
-            .theme
-            .try_get("ui.bufferline")
-            .unwrap_or_else(|| editor.theme.get("ui.statusline.inactive"));
-
-        let mut x = viewport.x;
-        let current_doc = view!(editor).doc;
-        let mut tab_regions = Vec::new();
-
-        for doc in editor.documents() {
-            let fname = doc
-                .path()
-                .unwrap_or(&scratch)
-                .file_name()
-                .unwrap_or_default()
-                .to_str()
-                .unwrap_or_default();
-
-            let is_active = current_doc == doc.id();
-            let style = if is_active {
-                bufferline_active
-                    .underline_style(helix_view::graphics::UnderlineStyle::Reset)
-                    .underline_color(Color::Reset)
-            } else {
-                bufferline_inactive.bg(Color::Reset)
-            };
-
-            let text = format!(" {} ", fname);
-            let used_width = viewport.x.saturating_sub(x);
-            let rem_width = surface.area.width.saturating_sub(used_width);
-
-            let x_start = x;
-            // Text on row 2 (bottom), indicator on row 1 (top)
-            x = surface
-                .set_stringn(x, viewport.y + 1, &text, rem_width as usize, style)
-                .0;
-
-            tab_regions.push((x_start, x, doc.id()));
-
-            // Draw top-bar indicator on first row for active tab
-            if is_active && viewport.height > 1 {
-                let indicator_style = bufferline_active
-                    .underline_style(helix_view::graphics::UnderlineStyle::Reset)
-                    .underline_color(Color::Reset);
-                for ix in x_start..x {
-                    surface.set_stringn(ix, viewport.y, "▔", 1, indicator_style);
-                }
-            }
-
-            if x >= surface.area.right() {
-                break;
-            }
-        }
-
-        tab_regions
-    }
-
     pub fn render_gutter<'d>(
         editor: &'d Editor,
         doc: &'d Document,
@@ -1001,7 +931,7 @@ impl EditorView {
         if let Some((on_next_key, _)) = self.on_next_key.take() {
             on_next_key(cxt, null_key_event);
         }
-        self.handle_keymap_event(cxt.editor.mode, cxt, null_key_event);
+        self.handle_keymap_event(cxt.editor.mode(), cxt, null_key_event);
         self.pseudo_pending.clear();
     }
 
@@ -1024,9 +954,10 @@ impl EditorView {
         } = *event;
 
         let pos_and_view = |editor: &Editor, row, column, ignore_virtual_text| {
-            editor.tree.views().find_map(|(view, _focus)| {
+            let dv = &editor.tabs[editor.active_tab];
+            dv.tree.views().find_map(|(view, _focus)| {
                 view.pos_at_screen_coords(
-                    &editor.documents[&view.doc],
+                    &dv.doc,
                     row,
                     column,
                     ignore_virtual_text,
@@ -1036,7 +967,8 @@ impl EditorView {
         };
 
         let gutter_coords_and_view = |editor: &Editor, row, column| {
-            editor.tree.views().find_map(|(view, _focus)| {
+            let dv = &editor.tabs[editor.active_tab];
+            dv.tree.views().find_map(|(view, _focus)| {
                 view.gutter_coords_at_screen_coords(row, column)
                     .map(|coords| (coords, view.id))
             })
@@ -1044,38 +976,26 @@ impl EditorView {
 
         match kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                // Check if click is on the bufferline (tab bar)
-                if row < 2 {
-                    if let Some(&(_, _, doc_id)) = self
-                        .tab_regions
-                        .iter()
-                        .find(|(x_start, x_end, _)| column >= *x_start && column < *x_end)
-                    {
-                        let view_id = view!(cxt.editor).id;
-                        cxt.editor.switch(doc_id, helix_view::editor::Action::Replace);
-                        cxt.editor.ensure_cursor_in_view(view_id);
-                        return EventResult::Consumed(None);
-                    }
-                }
-
                 let editor = &mut cxt.editor;
 
                 if let Some((pos, view_id)) = pos_and_view(editor, row, column, true) {
                     editor.focus(view_id);
 
-                    let doc = doc_mut!(editor, &view!(editor, view_id).doc);
+                    let is_select = editor.mode() == Mode::Select;
+                    let dv = &mut editor.tabs[editor.active_tab];
+                    let doc = &mut dv.doc;
 
                     if modifiers == KeyModifiers::ALT {
                         let selection = doc.selection(view_id).clone();
                         doc.set_selection(view_id, selection.push(Range::point(pos)));
-                    } else if editor.mode == Mode::Select {
+                    } else if is_select {
                         // Discards non-primary selections for consistent UX with normal mode
                         let primary = doc.selection(view_id).primary().put_cursor(
                             doc.text().slice(..),
                             pos,
                             true,
                         );
-                        editor.mouse_down_range = Some(primary);
+                        dv.mouse_down_range = Some(primary);
                         doc.set_selection(view_id, Selection::single(primary.anchor, primary.head));
                     } else {
                         doc.set_selection(view_id, Selection::point(pos));
@@ -1111,7 +1031,7 @@ impl EditorView {
             }
 
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                let current_view = cxt.editor.tree.focus;
+                let current_view = cxt.editor.tabs[cxt.editor.active_tab].tree.focus;
 
                 let direction = match event.kind {
                     MouseEventKind::ScrollUp => Direction::Backward,
@@ -1120,23 +1040,24 @@ impl EditorView {
                 };
 
                 match pos_and_view(cxt.editor, row, column, false) {
-                    Some((_, view_id)) => cxt.editor.tree.focus = view_id,
+                    Some((_, view_id)) => cxt.editor.tabs[cxt.editor.active_tab].tree.focus = view_id,
                     None => return EventResult::Ignored(None),
                 }
 
                 let offset = config.scroll_lines.unsigned_abs();
                 commands::scroll(cxt, offset, direction, false);
 
-                cxt.editor.tree.focus = current_view;
+                cxt.editor.tabs[cxt.editor.active_tab].tree.focus = current_view;
                 cxt.editor.ensure_cursor_in_view(current_view);
 
                 EventResult::Consumed(None)
             }
 
             MouseEventKind::Up(MouseButton::Left) => {
+                let mouse_down_range = cxt.editor.tabs[cxt.editor.active_tab].mouse_down_range.take();
                 let (view, doc) = current!(cxt.editor);
 
-                let should_yank = match cxt.editor.mouse_down_range.take() {
+                let should_yank = match mouse_down_range {
                     Some(down_range) => doc.selection(view.id).primary() != down_range,
                     None => {
                         // This should not happen under normal cases. We fall back to the original
@@ -1203,6 +1124,9 @@ impl Component for EditorView {
         event: &Event,
         context: &mut crate::compositor::Context,
     ) -> EventResult {
+        // Ensure editor is using our tab
+        context.editor.active_tab = self.tab_index;
+
         let mut cx = commands::Context {
             editor: context.editor,
             count: None,
@@ -1211,7 +1135,7 @@ impl Component for EditorView {
             jobs: context.jobs,
         };
 
-        match event {
+        let result = match event {
             Event::Paste(_contents) => {
                 // Paste is disabled in read-only viewer
                 EventResult::Consumed(None)
@@ -1246,32 +1170,33 @@ impl Component for EditorView {
                 // if the command consumed the last view, skip the render.
                 // on the next loop cycle the Application will then terminate.
                 if cx.editor.should_close() {
-                    return EventResult::Ignored(None);
-                }
-
-                let config = cx.editor.config();
-                let mode = cx.editor.mode();
-                let (view, doc) = current!(cx.editor);
-
-                view.ensure_cursor_in_view(doc, config.scrolloff);
-
-                // Store a history state if not in insert mode. This also takes care of
-                // committing changes when leaving insert mode.
-                if mode != Mode::Normal {
-                    doc.append_changes_to_history(view);
-                }
-                let callback = if callbacks.is_empty() {
-                    None
+                    EventResult::Ignored(None)
                 } else {
-                    let callback: crate::compositor::Callback = Box::new(move |compositor, cx| {
-                        for callback in callbacks {
-                            callback(compositor, cx)
-                        }
-                    });
-                    Some(callback)
-                };
+                    let config = cx.editor.config();
+                    let mode = cx.editor.mode();
+                    let (view, doc) = current!(cx.editor);
 
-                EventResult::Consumed(callback)
+                    view.ensure_cursor_in_view(doc, config.scrolloff);
+
+                    // Store a history state if not in insert mode. This also takes care of
+                    // committing changes when leaving insert mode.
+                    if mode != Mode::Normal {
+                        doc.append_changes_to_history(view);
+                    }
+                    let callback = if callbacks.is_empty() {
+                        None
+                    } else {
+                        let callback: crate::compositor::Callback =
+                            Box::new(move |compositor, cx| {
+                                for callback in callbacks {
+                                    callback(compositor, cx)
+                                }
+                            });
+                        Some(callback)
+                    };
+
+                    EventResult::Consumed(callback)
+                }
             }
 
             Event::Mouse(event) => self.handle_mouse_event(event, &mut cx),
@@ -1284,43 +1209,20 @@ impl Component for EditorView {
                 self.terminal_focused = false;
                 EventResult::Consumed(None)
             }
-        }
+        };
+
+        result
     }
 
     fn render(&mut self, area: Rect, surface: &mut Surface, cx: &mut Context) {
-        // clear with background color
-        surface.set_style(area, cx.editor.theme.get("ui.background"));
         let config = cx.editor.config();
 
-        // check if bufferline should be rendered
-        use helix_view::editor::BufferLine;
-        let use_bufferline = match config.bufferline {
-            BufferLine::Always => true,
-            BufferLine::Multiple if cx.editor.documents.len() > 1 => true,
-            _ => false,
-        };
+        // Resize our tree to match the given area
+        cx.editor.tabs[self.tab_index].tree.resize(area);
 
-        // -1 for commandline and -2 for bufferline
-        let bufferline_height: u16 = if use_bufferline { 2 } else { 0 };
-        let mut editor_area = area.clip_bottom(1);
-        if use_bufferline {
-            editor_area = editor_area.clip_top(bufferline_height);
-        }
-
-        // if the terminal size suddenly changed, we need to trigger a resize
-        cx.editor.resize(editor_area);
-
-        if use_bufferline {
-            self.tab_regions = Self::render_bufferline(
-                cx.editor,
-                area.with_height(bufferline_height),
-                surface,
-            );
-        }
-
-        for (view, is_focused) in cx.editor.tree.views() {
-            let doc = cx.editor.document(view.doc).unwrap();
-            self.render_view(cx.editor, doc, view, area, surface, is_focused);
+        let dv = &cx.editor.tabs[self.tab_index];
+        for (view, is_focused) in dv.tree.views() {
+            self.render_view(cx.editor, &cx.editor.tabs[self.tab_index].doc, view, area, surface, is_focused);
         }
 
         if config.auto_info {
@@ -1329,53 +1231,20 @@ impl Component for EditorView {
                 cx.editor.autoinfo = Some(info)
             }
         }
-
-        let key_width = 15u16; // for showing pending keys
-        let mut status_msg_width = 0;
-
-        // render status msg
-        if let Some((status_msg, severity)) = &cx.editor.status_msg {
-            status_msg_width = status_msg.width();
-            use helix_view::editor::Severity;
-            let style = if *severity == Severity::Error {
-                cx.editor.theme.get("error")
-            } else {
-                cx.editor.theme.get("ui.text")
-            };
-
-            surface.set_string(
-                area.x,
-                area.y + area.height.saturating_sub(1),
-                status_msg,
-                style,
-            );
-        }
-
-        if area.width.saturating_sub(status_msg_width as u16) > key_width {
-            let mut disp = String::new();
-            if let Some(count) = cx.editor.count {
-                disp.push_str(&count.to_string())
-            }
-            for key in self.keymaps.pending() {
-                disp.push_str(&key.key_sequence_format());
-            }
-            for key in &self.pseudo_pending {
-                disp.push_str(&key.key_sequence_format());
-            }
-            let style = cx.editor.theme.get("ui.text");
-            surface.set_string(
-                area.x + area.width.saturating_sub(key_width),
-                area.y + area.height.saturating_sub(1),
-                disp.get(disp.len().saturating_sub(key_width as usize)..)
-                    .unwrap_or(&disp),
-                style,
-            );
-        }
-
     }
 
     fn cursor(&self, _area: Rect, editor: &Editor) -> (Option<Position>, CursorKind) {
-        match editor.cursor() {
+        let dv = &editor.tabs[self.tab_index];
+        let view = dv.tree.get(dv.tree.focus);
+        let doc = &dv.doc;
+        let cursor_pos = dv.cursor_cache.get(view, doc);
+        let pos = cursor_pos.map(|mut pos| {
+            let inner = view.inner_area(doc);
+            pos.col += inner.x as usize;
+            pos.row += inner.y as usize;
+            pos
+        });
+        match (pos, CursorKind::Block) {
             // all block cursors are drawn manually
             (pos, CursorKind::Block) => {
                 if self.terminal_focused {
@@ -1387,6 +1256,62 @@ impl Component for EditorView {
             }
             cursor => cursor,
         }
+    }
+}
+
+impl crate::ui::app::Application for EditorView {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn id(&self) -> crate::ui::app::AppId {
+        self.app_id
+    }
+
+    fn name(&self, editor: &Editor) -> String {
+        match editor.tabs.get(self.tab_index).and_then(|dv| dv.doc.path()) {
+            Some(p) => p
+                .file_name()
+                .unwrap_or_default()
+                .to_str()
+                .unwrap_or_default()
+                .to_string(),
+            None => SCRATCH_BUFFER_NAME.to_string(),
+        }
+    }
+
+    fn handle_event(
+        &mut self,
+        event: &Event,
+        ctx: &mut Context,
+    ) -> EventResult {
+        <Self as Component>::handle_event(self, event, ctx)
+    }
+
+    fn render(&mut self, area: Rect, surface: &mut Surface, ctx: &mut Context) {
+        <Self as Component>::render(self, area, surface, ctx)
+    }
+
+    fn cursor(&self, area: Rect, editor: &Editor) -> (Option<Position>, CursorKind) {
+        <Self as Component>::cursor(self, area, editor)
+    }
+
+    fn pending_keys(&self) -> String {
+        let mut disp = String::new();
+        for key in self.keymaps.pending() {
+            disp.push_str(&key.key_sequence_format());
+        }
+        for key in &self.pseudo_pending {
+            disp.push_str(&key.key_sequence_format());
+        }
+        disp
+    }
+
+    fn icon_path(&self, editor: &Editor) -> Option<PathBuf> {
+        editor.tabs[self.tab_index].doc.path().cloned()
     }
 }
 

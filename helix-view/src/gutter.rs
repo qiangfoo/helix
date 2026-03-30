@@ -163,7 +163,7 @@ pub fn line_numbers<'doc>(
         .char_to_line(doc.selection(view.id).primary().cursor(text));
 
     let line_number = editor.config().line_number;
-    let _mode = editor.mode;
+    let _mode = editor.tabs[editor.active_tab].mode;
 
     Box::new(
         move |line: usize, selected: bool, first_visual_line: bool, out: &mut String| {
@@ -244,13 +244,13 @@ mod tests {
     use crate::document::Document;
     use crate::editor::{Config, GutterConfig, GutterLineNumbersConfig};
     use crate::graphics::Rect;
-    use crate::DocumentId;
+    use crate::AppId;
     use arc_swap::ArcSwap;
     use helix_core::{syntax, Rope};
 
     #[test]
     fn test_default_gutter_widths() {
-        let mut view = View::new(DocumentId::default(), GutterConfig::default());
+        let mut view = View::new(AppId::default(), GutterConfig::default());
         view.area = Rect::new(40, 40, 40, 40);
 
         let rope = Rope::from_str("abc\n\tdef");
@@ -276,7 +276,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut view = View::new(DocumentId::default(), gutters);
+        let mut view = View::new(AppId::default(), gutters);
         view.area = Rect::new(40, 40, 40, 40);
 
         let rope = Rope::from_str("abc\n\tdef");
@@ -295,7 +295,7 @@ mod tests {
             line_numbers: GutterLineNumbersConfig { min_width: 10 },
         };
 
-        let mut view = View::new(DocumentId::default(), gutters);
+        let mut view = View::new(AppId::default(), gutters);
         view.area = Rect::new(40, 40, 40, 40);
 
         let rope = Rope::from_str("abc\n\tdef");
@@ -318,7 +318,7 @@ mod tests {
             line_numbers: GutterLineNumbersConfig { min_width: 1 },
         };
 
-        let mut view = View::new(DocumentId::default(), gutters);
+        let mut view = View::new(AppId::default(), gutters);
         view.area = Rect::new(40, 40, 40, 40);
 
         let rope = Rope::from_str("a\nb");

@@ -27,7 +27,7 @@ use helix_core::{
     line_ending::line_end_char_index,
     match_brackets,
     movement::{self, move_vertically_visual, Direction},
-    object, pos_at_coords,
+    object,
     regex,
     search::{self},
     syntax::config::LanguageServerFeature,
@@ -45,7 +45,7 @@ use helix_view::{
     theme::Style,
     tree,
     view::View,
-    Document, DocumentId, Editor, ViewId,
+    Document, AppId, Editor,
 };
 
 use anyhow::{anyhow, bail, ensure, Context as _};
@@ -365,7 +365,7 @@ impl MappableCommand {
         file_explorer, "Open file explorer in workspace root",
         file_explorer_in_current_buffer_directory, "Open file explorer at current buffer's directory",
         file_explorer_in_current_directory, "Open file explorer at current working directory",
-        buffer_picker, "Open buffer picker",
+        buffer_picker, "Open tab picker",
         jumplist_picker, "Open jumplist picker",
         symbol_picker, "Open symbol picker",
         syntax_symbol_picker, "Open symbol picker from syntax information",
@@ -412,8 +412,8 @@ impl MappableCommand {
         goto_line_end, "Goto line end",
         goto_column, "Goto column",
         extend_to_column, "Extend to column",
-        goto_next_buffer, "Goto next buffer",
-        goto_previous_buffer, "Goto previous buffer",
+        goto_next_tab, "Goto next tab",
+        goto_previous_tab, "Goto previous tab",
         goto_line_end_newline, "Goto newline at line end",
         goto_first_nonwhitespace, "Goto first non-blank in line",
         trim_selections, "Trim whitespace from selections",
@@ -702,11 +702,12 @@ fn goto_line_end_impl(view: &mut View, doc: &mut Document, movement: Movement) {
 }
 
 fn goto_line_end(cx: &mut Context) {
+    let mode = cx.editor.mode();
     let (view, doc) = current!(cx.editor);
     goto_line_end_impl(
         view,
         doc,
-        if cx.editor.mode == Mode::Select {
+        if mode == Mode::Select {
             Movement::Extend
         } else {
             Movement::Move
@@ -732,11 +733,12 @@ fn goto_line_end_newline_impl(view: &mut View, doc: &mut Document, movement: Mov
 }
 
 fn goto_line_end_newline(cx: &mut Context) {
+    let mode = cx.editor.mode();
     let (view, doc) = current!(cx.editor);
     goto_line_end_newline_impl(
         view,
         doc,
-        if cx.editor.mode == Mode::Select {
+        if mode == Mode::Select {
             Movement::Extend
         } else {
             Movement::Move
@@ -763,11 +765,12 @@ fn goto_line_start_impl(view: &mut View, doc: &mut Document, movement: Movement)
 }
 
 fn goto_line_start(cx: &mut Context) {
+    let mode = cx.editor.mode();
     let (view, doc) = current!(cx.editor);
     goto_line_start_impl(
         view,
         doc,
-        if cx.editor.mode == Mode::Select {
+        if mode == Mode::Select {
             Movement::Extend
         } else {
             Movement::Move
@@ -775,37 +778,12 @@ fn goto_line_start(cx: &mut Context) {
     )
 }
 
-fn goto_next_buffer(cx: &mut Context) {
-    goto_buffer(cx.editor, Direction::Forward, cx.count());
+fn goto_next_tab(cx: &mut Context) {
+    cx.editor.next_tab();
 }
 
-fn goto_previous_buffer(cx: &mut Context) {
-    goto_buffer(cx.editor, Direction::Backward, cx.count());
-}
-
-fn goto_buffer(editor: &mut Editor, direction: Direction, count: usize) {
-    let current = view!(editor).doc;
-
-    let id = match direction {
-        Direction::Forward => {
-            let iter = editor.documents.keys();
-            // skip 'count' times past current buffer
-            iter.cycle().skip_while(|id| *id != &current).nth(count)
-        }
-        Direction::Backward => {
-            let iter = editor.documents.keys();
-            // skip 'count' times past current buffer
-            iter.rev()
-                .cycle()
-                .skip_while(|id| *id != &current)
-                .nth(count)
-        }
-    }
-    .unwrap();
-
-    let id = *id;
-
-    editor.switch(id, Action::Replace);
+fn goto_previous_tab(cx: &mut Context) {
+    cx.editor.prev_tab();
 }
 
 fn extend_to_line_start(cx: &mut Context) {
@@ -814,12 +792,13 @@ fn extend_to_line_start(cx: &mut Context) {
 }
 
 fn goto_first_nonwhitespace(cx: &mut Context) {
+    let mode = cx.editor.mode();
     let (view, doc) = current!(cx.editor);
 
     goto_first_nonwhitespace_impl(
         view,
         doc,
-        if cx.editor.mode == Mode::Select {
+        if mode == Mode::Select {
             Movement::Extend
         } else {
             Movement::Move
@@ -885,6 +864,7 @@ fn trim_selections(cx: &mut Context) {
 fn goto_window(cx: &mut Context, align: Align) {
     let count = cx.count() - 1;
     let config = cx.editor.config();
+    let is_select = cx.editor.mode() == Mode::Select;
     let (view, doc) = current!(cx.editor);
     let view_offset = doc.view_offset(view.id);
 
@@ -917,7 +897,7 @@ fn goto_window(cx: &mut Context, align: Align) {
     let selection = doc
         .selection(view.id)
         .clone()
-        .transform(|range| range.put_cursor(text, pos, cx.editor.mode == Mode::Select));
+        .transform(|range| range.put_cursor(text, pos, is_select));
     doc.set_selection(view.id, selection);
 }
 
@@ -1002,13 +982,13 @@ where
 {
     let count = cx.count();
     let motion = move |editor: &mut Editor| {
-        let (view, doc) = current!(editor);
-        let text = doc.text().slice(..);
-        let behavior = if editor.mode == Mode::Select {
+        let behavior = if editor.mode() == Mode::Select {
             Movement::Extend
         } else {
             Movement::Move
         };
+        let (view, doc) = current!(editor);
+        let text = doc.text().slice(..);
 
         let selection = doc
             .selection(view.id)
@@ -1210,7 +1190,30 @@ fn goto_file_impl(cx: &mut Context, action: Action) {
         if path.is_dir() {
             let picker = ui::file_picker(cx.editor, path.into());
             cx.push_layer(Box::new(overlaid(picker)));
-        } else if let Err(e) = cx.editor.open(path, action) {
+        } else {
+            open_path_as_tab(cx, path.to_path_buf());
+        }
+    }
+}
+
+/// Open a file path by creating a Document and adding it as a new tab via compositor callback.
+fn open_path_as_tab(cx: &mut Context, path: PathBuf) {
+    match Document::open(
+        &path,
+        None,
+        true,
+        cx.editor.config.clone(),
+        cx.editor.syn_loader.clone(),
+    ) {
+        Ok(doc) => {
+            let callback: crate::compositor::Callback = Box::new(move |compositor, cx| {
+                if let Some(tab_mgr) = compositor.find::<crate::ui::TabManager>() {
+                    tab_mgr.new_editor_tab(doc, cx.editor);
+                }
+            });
+            cx.callback.push(callback);
+        }
+        Err(e) => {
             cx.editor.set_error(format!("Open file failed: {:?}", e));
         }
     }
@@ -1218,7 +1221,7 @@ fn goto_file_impl(cx: &mut Context, action: Action) {
 
 /// Opens the given url. If the URL points to a valid textual file it is open in helix.
 //  Otherwise, the file is open using external program.
-fn open_url(cx: &mut Context, url: Url, action: Action) {
+fn open_url(cx: &mut Context, url: Url, _action: Action) {
     let doc = doc!(cx.editor);
     let rel_path = doc
         .relative_path()
@@ -1247,8 +1250,8 @@ fn open_url(cx: &mut Context, url: Url, action: Action) {
             if path.is_dir() {
                 let picker = ui::file_picker(cx.editor, path.into());
                 cx.push_layer(Box::new(overlaid(picker)));
-            } else if let Err(e) = cx.editor.open(path, action) {
-                cx.editor.set_error(format!("Open file failed: {:?}", e));
+            } else {
+                open_path_as_tab(cx, path.to_path_buf());
             }
         }
     }
@@ -1479,6 +1482,7 @@ fn repeat_last_motion(cx: &mut Context) {
 pub fn scroll(cx: &mut Context, offset: usize, direction: Direction, sync_cursor: bool) {
     use Direction::*;
     let config = cx.editor.config();
+    let mode = cx.editor.mode();
     let (view, doc) = current!(cx.editor);
     let mut view_offset = doc.view_offset(view.id);
 
@@ -1512,7 +1516,7 @@ pub fn scroll(cx: &mut Context, offset: usize, direction: Direction, sync_cursor
     let mut annotations = view.text_annotations(&*doc, None);
 
     if sync_cursor {
-        let movement = match cx.editor.mode {
+        let movement = match mode {
             Mode::Select => Movement::Extend,
             _ => Movement::Move,
         };
@@ -1571,7 +1575,7 @@ pub fn scroll(cx: &mut Context, offset: usize, direction: Direction, sync_cursor
         }
     }
 
-    let anchor = if cx.editor.mode == Mode::Select {
+    let anchor = if mode == Mode::Select {
         range.anchor
     } else {
         head
@@ -2015,8 +2019,7 @@ fn global_search(cx: &mut Context) {
                 .boxed();
         }
 
-        let documents: Vec<_> = editor
-            .documents()
+        let documents: Vec<_> = std::iter::once(&editor.tabs[editor.active_tab].doc)
             .map(|doc| (doc.path().cloned(), doc.text().to_owned()))
             .collect();
 
@@ -2139,36 +2142,30 @@ fn global_search(cx: &mut Context) {
         move |cx,
               FileResult {
                   path,
-                  line_start,
-                  line_end,
                   ..
               },
-              action| {
-            let doc = match cx.editor.open(path, action) {
-                Ok(id) => doc_mut!(cx.editor, &id),
+              _action| {
+            match Document::open(
+                path,
+                None,
+                true,
+                cx.editor.config.clone(),
+                cx.editor.syn_loader.clone(),
+            ) {
+                Ok(doc) => {
+                    let callback = crate::job::Callback::EditorCompositor(Box::new(
+                        move |editor: &mut Editor, compositor: &mut crate::compositor::Compositor| {
+                            if let Some(tab_mgr) = compositor.find::<crate::ui::TabManager>() {
+                                tab_mgr.new_editor_tab(doc, editor);
+                            }
+                        },
+                    ));
+                    cx.jobs.callback(async { Ok(callback) });
+                }
                 Err(e) => {
                     cx.editor
                         .set_error(format!("Failed to open file '{}': {}", path.display(), e));
-                    return;
                 }
-            };
-
-            let line_start = *line_start;
-            let line_end = *line_end;
-            let view = view_mut!(cx.editor);
-            let text = doc.text();
-            if line_start >= text.len_lines() {
-                cx.editor.set_error(
-                    "The line you jumped to does not exist anymore because the file has changed.",
-                );
-                return;
-            }
-            let start = text.line_to_char(line_start);
-            let end = text.line_to_char((line_end + 1).min(text.len_lines()));
-
-            doc.set_selection(view.id, Selection::single(start, end));
-            if action.align_view(view, doc.id()) {
-                align_view(doc, view, Align::Center);
             }
         },
     )
@@ -2488,100 +2485,86 @@ fn file_explorer_in_current_directory(cx: &mut Context) {
 }
 
 fn buffer_picker(cx: &mut Context) {
-    let current = view!(cx.editor).doc;
-
-    struct BufferMeta {
-        id: DocumentId,
+    struct TabMeta {
+        tab_index: usize,
         path: Option<PathBuf>,
-        is_current: bool,
-        focused_at: std::time::Instant,
+        name: String,
+        is_active: bool,
     }
 
-    let new_meta = |doc: &Document| BufferMeta {
-        id: doc.id(),
-        path: doc.path().cloned(),
-        is_current: doc.id() == current,
-        focused_at: doc.focused_at,
-    };
+    // Gather tab metadata via a compositor callback so we can access TabManager
+    cx.callback.push(Box::new(
+        |compositor: &mut Compositor, cx: &mut compositor::Context| {
+            let tab_manager = match compositor.find::<ui::TabManager>() {
+                Some(tm) => tm,
+                None => return,
+            };
+            let active_index = tab_manager.active_index();
+            let mut items: Vec<TabMeta> = Vec::new();
 
-    let mut items = cx
-        .editor
-        .documents
-        .values()
-        .map(new_meta)
-        .collect::<Vec<BufferMeta>>();
-
-    // mru
-    items.sort_unstable_by_key(|item| std::cmp::Reverse(item.focused_at));
-
-    let columns = [
-        PickerColumn::new("id", |meta: &BufferMeta, _| meta.id.to_string().into()),
-        PickerColumn::new("flags", |meta: &BufferMeta, _| {
-            let mut flags = String::new();
-            if meta.is_current {
-                flags.push('*');
+            for i in 0..tab_manager.tab_count() {
+                let tab = &tab_manager.tabs()[i];
+                let name = tab.name(cx.editor);
+                let path = tab.icon_path(cx.editor);
+                items.push(TabMeta {
+                    tab_index: i,
+                    path,
+                    name,
+                    is_active: i == active_index,
+                });
             }
-            flags.into()
-        }),
-        PickerColumn::new("path", |meta: &BufferMeta, _| {
-            let path = meta
-                .path
-                .as_deref()
-                .map(helix_stdx::path::get_relative_path);
-            path.as_deref()
-                .and_then(Path::to_str)
-                .unwrap_or(SCRATCH_BUFFER_NAME)
-                .to_string()
-                .into()
-        }),
-    ];
 
-    let initial_cursor = if cx
-        .editor
-        .config()
-        .buffer_picker
-        .start_position
-        .is_previous()
-        && !items.is_empty()
-    {
-        1
-    } else {
-        0
-    };
+            let columns = [
+                PickerColumn::new("flags", |meta: &TabMeta, _| {
+                    if meta.is_active { "*".into() } else { "".into() }
+                }),
+                PickerColumn::new("name", |meta: &TabMeta, _| {
+                    meta.name.clone().into()
+                }),
+            ];
 
-    let picker = Picker::new(columns, 2, items, (), |cx, meta, action| {
-        cx.editor.switch(meta.id, action);
-    })
-    .with_initial_cursor(initial_cursor)
-    .with_preview(|editor, meta| {
-        let doc = &editor.documents.get(&meta.id)?;
-        let lines = doc.selections().values().next().map(|selection| {
-            let cursor_line = selection.primary().cursor_line(doc.text().slice(..));
-            (cursor_line, cursor_line)
-        });
-        Some((meta.id.into(), lines))
-    });
-    cx.push_layer(Box::new(overlaid(picker)));
+            let picker = Picker::new(columns, 1, items, (), move |cx, meta, _action| {
+                let tab_index = meta.tab_index;
+                cx.jobs.callback(async move {
+                    let callback = crate::job::Callback::EditorCompositor(Box::new(
+                        move |editor, _compositor| {
+                            editor.activate_tab(tab_index);
+                        },
+                    ));
+                    Ok(callback)
+                });
+            })
+            .with_preview(|_editor, meta| {
+                let path = meta.path.as_deref()?;
+                Some((path.into(), None))
+            });
+            compositor.push(Box::new(overlaid(picker)));
+        },
+    ));
 }
 
 fn jumplist_picker(cx: &mut Context) {
     struct JumpMeta {
-        id: DocumentId,
+        id: AppId,
         path: Option<PathBuf>,
         selection: Selection,
         text: String,
         is_current: bool,
     }
 
-    for (view, _) in cx.editor.tree.views_mut() {
-        for doc_id in view.jumps.iter().map(|e| e.0).collect::<Vec<_>>().iter() {
-            let doc = doc_mut!(cx.editor, doc_id);
-            view.sync_changes(doc);
+    {
+        let dv = &mut cx.editor.tabs[cx.editor.active_tab];
+        for (view, _) in dv.tree.views_mut() {
+            view.sync_changes(&mut dv.doc);
         }
     }
 
-    let new_meta = |view: &View, doc_id: DocumentId, selection: Selection| {
-        let doc = &cx.editor.documents.get(&doc_id);
+    let new_meta = |view: &View, doc_id: AppId, selection: Selection| {
+        let doc = if cx.editor.tabs[cx.editor.active_tab].doc.id() == doc_id {
+            Some(&cx.editor.tabs[cx.editor.active_tab].doc)
+        } else {
+            None
+        };
         let text = doc.map_or("".into(), |d| {
             selection
                 .fragments(d.text().slice(..))
@@ -2630,27 +2613,28 @@ fn jumplist_picker(cx: &mut Context) {
     let picker = Picker::new(
         columns,
         1, // path
-        cx.editor.tree.views().flat_map(|(view, _)| {
+        cx.editor.tabs[cx.editor.active_tab].tree.views().flat_map(|(view, _)| {
             view.jumps
                 .iter()
                 .rev()
                 .map(|(doc_id, selection)| new_meta(view, *doc_id, selection.clone()))
         }),
         (),
-        |cx, meta, action| {
-            cx.editor.switch(meta.id, action);
+        |cx, meta, _action| {
             let config = cx.editor.config();
-            let (view, doc) = (view_mut!(cx.editor), doc_mut!(cx.editor, &meta.id));
+            let (view, doc) = current!(cx.editor);
             doc.set_selection(view.id, meta.selection.clone());
-            if action.align_view(view, doc.id()) {
-                view.ensure_cursor_in_view_center(doc, config.scrolloff);
-            }
+            view.ensure_cursor_in_view_center(doc, config.scrolloff);
         },
     )
     .with_preview(|editor, meta| {
-        let doc = &editor.documents.get(&meta.id)?;
-        let line = meta.selection.primary().cursor_line(doc.text().slice(..));
-        Some((meta.id.into(), Some((line, line))))
+        let doc = &editor.tabs[editor.active_tab].doc;
+        if doc.id() == meta.id {
+            let line = meta.selection.primary().cursor_line(doc.text().slice(..));
+            Some((meta.id.into(), Some((line, line))))
+        } else {
+            None
+        }
     });
     cx.push_layer(Box::new(overlaid(picker)));
 }
@@ -2752,9 +2736,16 @@ fn changed_file_picker(cx: &mut Context) {
                 },
             });
             doc.set_path(Some(std::path::Path::new(&name)));
-            let id = cx.editor.new_file_from_document(Action::Replace, doc);
             let loader = cx.editor.syn_loader.load();
-            let _ = doc_mut!(cx.editor, &id).set_language_by_language_id("diff", &loader);
+            let _ = doc.set_language_by_language_id("diff", &loader);
+            let callback = crate::job::Callback::EditorCompositor(Box::new(
+                move |editor: &mut Editor, compositor: &mut crate::compositor::Compositor| {
+                    if let Some(tab_mgr) = compositor.find::<crate::ui::TabManager>() {
+                        tab_mgr.new_editor_tab(doc, editor);
+                    }
+                },
+            ));
+            cx.jobs.callback(async { Ok(callback) });
         },
     )
     .with_vi_nav();
@@ -2796,8 +2787,8 @@ pub fn command_palette(cx: &mut Context) {
 
     cx.callback.push(Box::new(
         move |compositor: &mut Compositor, cx: &mut compositor::Context| {
-            let keymap = compositor.find::<ui::EditorView>().unwrap().keymaps.map()
-                [&cx.editor.mode]
+            let keymap = compositor.find::<ui::TabManager>().unwrap().active_editor_view().unwrap().keymaps.map()
+                [&cx.editor.mode()]
                 .reverse_map();
 
             let commands = MappableCommand::STATIC_COMMAND_LIST.iter().cloned().chain(
@@ -2853,11 +2844,10 @@ pub fn command_palette(cx: &mut Context) {
 
                 command.execute(&mut ctx);
 
-                if ctx.editor.tree.contains(focus) {
+                if ctx.editor.tabs[ctx.editor.active_tab].tree.contains(focus) {
                     let config = ctx.editor.config();
                     let mode = ctx.editor.mode();
-                    let view = view_mut!(ctx.editor, focus);
-                    let doc = doc_mut!(ctx.editor, &view.doc);
+                    let (view, doc) = current!(ctx.editor);
 
                     view.ensure_cursor_in_view(doc, config.scrolloff);
 
@@ -2992,26 +2982,13 @@ fn goto_column_impl(cx: &mut Context, movement: Movement) {
 }
 
 fn goto_last_accessed_file(cx: &mut Context) {
-    let view = view_mut!(cx.editor);
-    if let Some(alt) = view.docs_access_history.pop() {
-        cx.editor.switch(alt, Action::Replace);
-    } else {
-        cx.editor.set_error("no last accessed buffer")
-    }
+    // In single-doc mode, there is no alternate buffer to switch to.
+    cx.editor.set_error("no last accessed buffer");
 }
 
 fn goto_last_modified_file(cx: &mut Context) {
-    let view = view!(cx.editor);
-    let alternate_file = view
-        .last_modified_docs
-        .into_iter()
-        .flatten()
-        .find(|&id| id != view.doc);
-    if let Some(alt) = alternate_file {
-        cx.editor.switch(alt, Action::Replace);
-    } else {
-        cx.editor.set_error("no last modified buffer")
-    }
+    // In single-doc mode, there is no alternate buffer to switch to.
+    cx.editor.set_error("no last modified buffer");
 }
 
 fn select_mode(cx: &mut Context) {
@@ -3032,12 +3009,12 @@ fn select_mode(cx: &mut Context) {
     });
     doc.set_selection(view.id, selection);
 
-    cx.editor.mode = Mode::Select;
+    cx.editor.tabs[cx.editor.active_tab].mode = Mode::Select;
 }
 
 fn exit_select_mode(cx: &mut Context) {
-    if cx.editor.mode == Mode::Select {
-        cx.editor.mode = Mode::Normal;
+    if cx.editor.mode() == Mode::Select {
+        cx.editor.tabs[cx.editor.active_tab].mode = Mode::Normal;
     }
 }
 
@@ -3161,6 +3138,7 @@ fn goto_prev_change(cx: &mut Context) {
 fn goto_next_change_impl(cx: &mut Context, direction: Direction) {
     let count = cx.count() as u32 - 1;
     let motion = move |editor: &mut Editor| {
+        let is_select = editor.mode() == Mode::Select;
         let (view, doc) = current!(editor);
         let doc_text = doc.text().slice(..);
         let diff_handle = if let Some(diff_handle) = doc.diff_handle() {
@@ -3187,7 +3165,7 @@ fn goto_next_change_impl(cx: &mut Context, direction: Direction) {
             };
             let hunk = diff.nth_hunk(hunk_idx);
             let new_range = hunk_range(hunk, doc_text);
-            if editor.mode == Mode::Select {
+            if is_select {
                 let head = if new_range.head < range.anchor {
                     new_range.anchor
                 } else {
@@ -3465,8 +3443,8 @@ pub fn extend_parent_node_start(cx: &mut Context) {
 }
 
 fn match_brackets(cx: &mut Context) {
+    let is_select = cx.editor.mode() == Mode::Select;
     let (view, doc) = current!(cx.editor);
-    let is_select = cx.editor.mode == Mode::Select;
     let text = doc.text();
     let text_slice = text.slice(..);
 
@@ -3488,11 +3466,13 @@ fn match_brackets(cx: &mut Context) {
 //
 
 fn jump_forward(cx: &mut Context) {
-    cx.editor.jump_forward(cx.editor.tree.focus, cx.count());
+    let focus = cx.editor.tabs[cx.editor.active_tab].tree.focus;
+    cx.editor.jump_forward(focus, cx.count());
 }
 
 fn jump_backward(cx: &mut Context) {
-    cx.editor.jump_backward(cx.editor.tree.focus, cx.count());
+    let focus = cx.editor.tabs[cx.editor.active_tab].tree.focus;
+    cx.editor.jump_backward(focus, cx.count());
 }
 
 fn save_selection(cx: &mut Context) {
@@ -3554,13 +3534,17 @@ fn split(editor: &mut Editor, action: Action) {
     let selection = doc.selection(view.id).clone();
     let offset = doc.view_offset(view.id);
 
-    editor.switch(id, action);
+    // Create a new split view for the same document
+    let new_view = View::new(id, editor.config().gutters.clone());
+    let layout = match action {
+        Action::HorizontalSplit => helix_view::tree::Layout::Horizontal,
+        _ => helix_view::tree::Layout::Vertical,
+    };
+    editor.tabs[editor.active_tab].tree.split(new_view, layout);
 
-    // match the selection in the previous view
+    // match the selection in the new view
     let (view, doc) = current!(editor);
     doc.set_selection(view.id, selection);
-    // match the view scroll offset (switch doesn't handle this fully
-    // since the selection is only matched after the split)
     doc.set_view_offset(view.id, offset);
 }
 
@@ -3569,7 +3553,8 @@ fn hsplit(cx: &mut Context) {
 }
 
 fn hsplit_new(cx: &mut Context) {
-    cx.editor.new_file(Action::HorizontalSplit);
+    // In read-only viewer, just split with the same document
+    split(cx.editor, Action::HorizontalSplit);
 }
 
 fn vsplit(cx: &mut Context) {
@@ -3577,11 +3562,12 @@ fn vsplit(cx: &mut Context) {
 }
 
 fn vsplit_new(cx: &mut Context) {
-    cx.editor.new_file(Action::VerticalSplit);
+    // In read-only viewer, just split with the same document
+    split(cx.editor, Action::VerticalSplit);
 }
 
 fn wclose(cx: &mut Context) {
-    if cx.editor.tree.views().count() == 1 {
+    if cx.editor.tabs[cx.editor.active_tab].tree.views().count() == 1 {
         if let Err(err) = typed::buffers_remaining_impl(cx.editor) {
             cx.editor.set_error(err.to_string());
             return;
@@ -3595,6 +3581,7 @@ fn wclose(cx: &mut Context) {
 fn wonly(cx: &mut Context) {
     let views = cx
         .editor
+        .tabs[cx.editor.active_tab]
         .tree
         .views()
         .map(|(v, focus)| (v.id, focus))
@@ -3658,6 +3645,7 @@ fn scroll_down(cx: &mut Context) {
 fn goto_ts_object_impl(cx: &mut Context, object: &'static str, direction: Direction) {
     let count = cx.count();
     let motion = move |editor: &mut Editor| {
+        let is_select = editor.mode() == Mode::Select;
         let (view, doc) = current!(editor);
         let loader = editor.syn_loader.load();
         if let Some(syntax) = doc.syntax() {
@@ -3669,7 +3657,7 @@ fn goto_ts_object_impl(cx: &mut Context, object: &'static str, direction: Direct
                     text, range, object, direction, &root, syntax, &loader, count,
                 );
 
-                if editor.mode == Mode::Select {
+                if is_select {
                     let head = if new_range.head < range.anchor {
                         new_range.anchor
                     } else {
@@ -3917,7 +3905,6 @@ fn jump_to_label(cx: &mut Context, labels: Vec<Range>, behaviour: Movement) {
     // for that label if it exists.
     let primary_selection = doc.selection(view.id).primary();
     let view = view.id;
-    let doc = doc.id();
     cx.on_next_key(move |cx, event| {
         let alphabet = &cx.editor.config().jump_label_alphabet;
         let Some(i) = event
@@ -3925,17 +3912,17 @@ fn jump_to_label(cx: &mut Context, labels: Vec<Range>, behaviour: Movement) {
             .filter(|_| event.modifiers.is_empty())
             .and_then(|ch| alphabet.iter().position(|&it| it == ch))
         else {
-            doc_mut!(cx.editor, &doc).remove_jump_labels(view);
+            doc_mut!(cx.editor).remove_jump_labels(view);
             return;
         };
         let outer = i * alphabet.len();
         // Bail if the given character cannot be a jump label.
         if outer > labels.len() {
-            doc_mut!(cx.editor, &doc).remove_jump_labels(view);
+            doc_mut!(cx.editor).remove_jump_labels(view);
             return;
         }
         cx.on_next_key(move |cx, event| {
-            doc_mut!(cx.editor, &doc).remove_jump_labels(view);
+            doc_mut!(cx.editor).remove_jump_labels(view);
             let alphabet = &cx.editor.config().jump_label_alphabet;
             let Some(inner) = event
                 .char()
@@ -3966,7 +3953,7 @@ fn jump_to_label(cx: &mut Context, labels: Vec<Range>, behaviour: Movement) {
                     range.with_direction(Direction::Forward)
                 };
                 save_selection(cx);
-                doc_mut!(cx.editor, &doc).set_selection(view, range.into());
+                doc_mut!(cx.editor).set_selection(view, range.into());
             }
         });
     });

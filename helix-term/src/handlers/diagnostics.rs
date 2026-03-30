@@ -17,22 +17,22 @@ use helix_view::events::{
 use helix_view::handlers::diagnostics::DiagnosticEvent;
 use helix_view::handlers::lsp::{PullAllDocumentsDiagnosticsEvent, PullDiagnosticsEvent};
 use helix_view::handlers::Handlers;
-use helix_view::{DocumentId, Editor};
+use helix_view::{AppId, Editor};
 
 use crate::events::OnModeSwitch;
 use crate::job;
 
 pub(super) fn register_hooks(handlers: &Handlers) {
     register_hook!(move |event: &mut DiagnosticsDidChange<'_>| {
-        if event.editor.mode != Mode::Normal {
-            for (view, _) in event.editor.tree.views_mut() {
+        if event.editor.mode() != Mode::Normal {
+            for (view, _) in event.editor.tabs[event.editor.active_tab].tree.views_mut() {
                 send_blocking(&view.diagnostics_handler.events, DiagnosticEvent::Refresh)
             }
         }
         Ok(())
     });
     register_hook!(move |event: &mut OnModeSwitch<'_, '_>| {
-        for (view, _) in event.cx.editor.tree.views_mut() {
+        for (view, _) in event.cx.editor.tabs[event.cx.editor.active_tab].tree.views_mut() {
             view.diagnostics_handler.active = event.new_mode != Mode::Normal;
         }
         Ok(())
@@ -89,11 +89,8 @@ pub(super) fn register_hooks(handlers: &Handlers) {
     });
 
     register_hook!(move |event: &mut LanguageServerInitialized<'_>| {
-        let doc_ids: Vec<_> = event.editor.documents.keys().copied().collect();
-
-        for doc_id in doc_ids {
-            request_document_diagnostics(event.editor, doc_id);
-        }
+        let doc_id = event.editor.tabs[event.editor.active_tab].doc.id();
+        request_document_diagnostics(event.editor, doc_id);
 
         Ok(())
     });
@@ -101,7 +98,7 @@ pub(super) fn register_hooks(handlers: &Handlers) {
 
 #[derive(Debug, Default)]
 pub(super) struct PullDiagnosticsHandler {
-    document_ids: HashSet<DocumentId>,
+    document_ids: HashSet<AppId>,
 }
 
 impl helix_event::AsyncHook for PullDiagnosticsHandler {
@@ -146,29 +143,27 @@ impl helix_event::AsyncHook for PullAllDocumentsDiagnosticHandler {
     fn finish_debounce(&mut self) {
         let language_servers = mem::take(&mut self.language_servers);
         job::dispatch_blocking(move |editor, _| {
-            let documents: Vec<_> = editor.documents.keys().copied().collect();
-
-            for document in documents {
-                request_document_diagnostics_for_language_severs(
-                    editor,
-                    document,
-                    language_servers.clone(),
-                );
-            }
+            let doc_id = editor.tabs[editor.active_tab].doc.id();
+            request_document_diagnostics_for_language_severs(
+                editor,
+                doc_id,
+                language_servers,
+            );
         })
     }
 }
 
 fn request_document_diagnostics_for_language_severs(
     editor: &mut Editor,
-    doc_id: DocumentId,
+    doc_id: AppId,
     language_servers: HashSet<LanguageServerId>,
 ) {
-    let Some(doc) = editor.document_mut(doc_id) else {
+    if editor.tabs[editor.active_tab].doc.id() != doc_id {
         return;
-    };
+    }
 
-    let cancel = doc.pull_diagnostic_controller.restart();
+    let cancel = editor.tabs[editor.active_tab].doc.pull_diagnostic_controller.restart();
+    let doc = &editor.tabs[editor.active_tab].doc;
 
     let mut futures: FuturesUnordered<_> = language_servers
         .iter()
@@ -254,12 +249,12 @@ fn request_document_diagnostics_for_language_severs(
     });
 }
 
-pub fn request_document_diagnostics(editor: &mut Editor, doc_id: DocumentId) {
-    let Some(doc) = editor.document(doc_id) else {
+pub fn request_document_diagnostics(editor: &mut Editor, doc_id: AppId) {
+    if editor.tabs[editor.active_tab].doc.id() != doc_id {
         return;
-    };
+    }
 
-    let language_servers = doc
+    let language_servers = editor.tabs[editor.active_tab].doc
         .language_servers_with_feature(LanguageServerFeature::PullDiagnostics)
         .map(|language_servers| language_servers.id())
         .collect();
@@ -272,7 +267,7 @@ fn handle_pull_diagnostics_response(
     result: lsp::DocumentDiagnosticReportResult,
     provider: DiagnosticProvider,
     uri: Uri,
-    document_id: DocumentId,
+    document_id: AppId,
 ) {
     match result {
         lsp::DocumentDiagnosticReportResult::Report(report) => {
@@ -292,8 +287,8 @@ fn handle_pull_diagnostics_response(
                 }
             };
 
-            if let Some(doc) = editor.document_mut(document_id) {
-                doc.previous_diagnostic_id = result_id;
+            if editor.tabs[editor.active_tab].doc.id() == document_id {
+                editor.tabs[editor.active_tab].doc.previous_diagnostic_id = result_id;
             };
         }
         lsp::DocumentDiagnosticReportResult::Partial(_) => {}

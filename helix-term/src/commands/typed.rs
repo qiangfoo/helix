@@ -7,7 +7,7 @@ use helix_core::command_line::{Args, Flag, Signature, Token, TokenKind};
 use helix_core::fuzzy::fuzzy_match;
 use helix_stdx::path::home_dir;
 use helix_view::document::DEFAULT_LANGUAGE_NAME;
-use helix_view::editor::{CloseError, ConfigEvent};
+use helix_view::editor::ConfigEvent;
 use helix_view::expansion;
 use serde_json::Value;
 use ui::completers::{self, Completer};
@@ -70,13 +70,12 @@ fn quit(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> anyhow
         return Ok(());
     }
 
-    // last view and we have unsaved changes
-    if cx.editor.tree.views().count() == 1 {
-        buffers_remaining_impl(cx.editor)?
-    }
-
     cx.block_try_flush_writes()?;
-    cx.editor.close(view!(cx.editor).id);
+    // Save session before clearing tabs
+    crate::session::save_session(cx.editor);
+    // Close all tabs to exit
+    cx.editor.tabs.clear();
+    cx.editor.active_tab = 0;
 
     Ok(())
 }
@@ -91,7 +90,7 @@ fn open(cx: &mut compositor::Context, args: Args, event: PromptEvent) -> anyhow:
 
 fn open_impl(cx: &mut compositor::Context, args: Args, action: Action) -> anyhow::Result<()> {
     for arg in args {
-        let (path, pos) = crate::args::parse_file(&arg);
+        let (path, _pos) = crate::args::parse_file(&arg);
         let path = helix_stdx::path::expand_tilde(path);
         // If the path is a directory, open a file picker on that directory and update the status
         // message
@@ -108,142 +107,28 @@ fn open_impl(cx: &mut compositor::Context, args: Args, action: Action) -> anyhow
             };
             cx.jobs.callback(callback);
         } else {
-            // Otherwise, just open the file
-            let _ = cx.editor.open(&path, action)?;
-            let (view, doc) = current!(cx.editor);
-            let pos = Selection::point(pos_at_coords(doc.text().slice(..), pos, true));
-            doc.set_selection(view.id, pos);
-            // does not affect opening a buffer without pos
-            align_view(doc, view, Align::Center);
+            // Otherwise, open the file as a new tab
+            let doc = Document::open(
+                &path,
+                None,
+                true,
+                cx.editor.config.clone(),
+                cx.editor.syn_loader.clone(),
+            )?;
+            let callback = crate::job::Callback::EditorCompositor(Box::new(
+                move |editor: &mut Editor, compositor: &mut Compositor| {
+                    if let Some(tab_mgr) = compositor.find::<crate::ui::TabManager>() {
+                        tab_mgr.new_editor_tab(doc, editor);
+                    }
+                },
+            ));
+            cx.jobs.callback(async { Ok(callback) });
         }
     }
     Ok(())
 }
 
-fn buffer_close_by_ids_impl(
-    cx: &mut compositor::Context,
-    doc_ids: &[DocumentId],
-    force: bool,
-) -> anyhow::Result<()> {
-    cx.block_try_flush_writes()?;
-
-    let (modified_ids, modified_names): (Vec<_>, Vec<_>) = doc_ids
-        .iter()
-        .filter_map(|&doc_id| {
-            if let Err(CloseError::BufferModified(name)) = cx.editor.close_document(doc_id, force) {
-                Some((doc_id, name))
-            } else {
-                None
-            }
-        })
-        .unzip();
-
-    if let Some(first) = modified_ids.first() {
-        let current = doc!(cx.editor);
-        // If the current document is unmodified, and there are modified
-        // documents, switch focus to the first modified doc.
-        if !modified_ids.contains(&current.id()) {
-            cx.editor.switch(*first, Action::Replace);
-        }
-        bail!(
-            "{} unsaved buffer{} remaining: {:?}",
-            modified_names.len(),
-            if modified_names.len() == 1 { "" } else { "s" },
-            modified_names,
-        );
-    }
-
-    Ok(())
-}
-
-fn buffer_gather_paths_impl(editor: &mut Editor, args: Args) -> Vec<DocumentId> {
-    // No arguments implies current document
-    if args.is_empty() {
-        let doc_id = view!(editor).doc;
-        return vec![doc_id];
-    }
-
-    let mut nonexistent_buffers = vec![];
-    let mut document_ids = vec![];
-    for arg in args {
-        let doc_id = editor.documents().find_map(|doc| {
-            let arg_path = Some(Path::new(arg.as_ref()));
-            if doc.path().map(|p| p.as_path()) == arg_path || doc.relative_path() == arg_path {
-                Some(doc.id())
-            } else {
-                None
-            }
-        });
-
-        match doc_id {
-            Some(doc_id) => document_ids.push(doc_id),
-            None => nonexistent_buffers.push(format!("'{}'", arg)),
-        }
-    }
-
-    if !nonexistent_buffers.is_empty() {
-        editor.set_error(format!(
-            "cannot close non-existent buffers: {}",
-            nonexistent_buffers.join(", ")
-        ));
-    }
-
-    document_ids
-}
-
-fn buffer_close(
-    cx: &mut compositor::Context,
-    args: Args,
-    event: PromptEvent,
-) -> anyhow::Result<()> {
-    if event != PromptEvent::Validate {
-        return Ok(());
-    }
-
-    let document_ids = buffer_gather_paths_impl(cx.editor, args);
-    buffer_close_by_ids_impl(cx, &document_ids, false)
-}
-
-fn buffer_gather_others_impl(editor: &mut Editor, skip_visible: bool) -> Vec<DocumentId> {
-    if skip_visible {
-        let visible_document_ids = editor
-            .tree
-            .views()
-            .map(|view| &view.0.doc)
-            .collect::<HashSet<_>>();
-        editor
-            .documents()
-            .map(|doc| doc.id())
-            .filter(|doc_id| !visible_document_ids.contains(doc_id))
-            .collect()
-    } else {
-        let current_document = &doc!(editor).id();
-        editor
-            .documents()
-            .map(|doc| doc.id())
-            .filter(|doc_id| doc_id != current_document)
-            .collect()
-    }
-}
-
-fn buffer_close_others(
-    cx: &mut compositor::Context,
-    args: Args,
-    event: PromptEvent,
-) -> anyhow::Result<()> {
-    if event != PromptEvent::Validate {
-        return Ok(());
-    }
-
-    let document_ids = buffer_gather_others_impl(cx.editor, args.has_flag("skip-visible"));
-    buffer_close_by_ids_impl(cx, &document_ids, false)
-}
-
-fn buffer_gather_all_impl(editor: &mut Editor) -> Vec<DocumentId> {
-    editor.documents().map(|doc| doc.id()).collect()
-}
-
-fn buffer_close_all(
+fn tab_next(
     cx: &mut compositor::Context,
     _args: Args,
     event: PromptEvent,
@@ -251,25 +136,11 @@ fn buffer_close_all(
     if event != PromptEvent::Validate {
         return Ok(());
     }
-
-    let document_ids = buffer_gather_all_impl(cx.editor);
-    buffer_close_by_ids_impl(cx, &document_ids, false)
-}
-
-fn buffer_next(
-    cx: &mut compositor::Context,
-    _args: Args,
-    event: PromptEvent,
-) -> anyhow::Result<()> {
-    if event != PromptEvent::Validate {
-        return Ok(());
-    }
-
-    goto_buffer(cx.editor, Direction::Forward, 1);
+    cx.editor.next_tab();
     Ok(())
 }
 
-fn buffer_previous(
+fn tab_previous(
     cx: &mut compositor::Context,
     _args: Args,
     event: PromptEvent,
@@ -277,8 +148,53 @@ fn buffer_previous(
     if event != PromptEvent::Validate {
         return Ok(());
     }
+    cx.editor.prev_tab();
+    Ok(())
+}
 
-    goto_buffer(cx.editor, Direction::Backward, 1);
+fn tab_close(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    crate::session::save_session(cx.editor);
+    let index = cx.editor.active_tab;
+    cx.editor.close_tab(index);
+    Ok(())
+}
+
+fn tab_close_others(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    let active = cx.editor.active_tab;
+    let count = cx.editor.tab_count();
+    for i in (0..count).rev() {
+        if i != active {
+            cx.editor.close_tab(i);
+        }
+    }
+    Ok(())
+}
+
+fn tab_close_all(
+    cx: &mut compositor::Context,
+    _args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+    crate::session::save_session(cx.editor);
+    cx.editor.tabs.clear();
+    cx.editor.active_tab = 0;
     Ok(())
 }
 
@@ -288,7 +204,16 @@ fn new_file(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> an
         return Ok(());
     }
 
-    cx.editor.new_file(Action::Replace);
+    // Create a new empty document as a new tab
+    let doc = Document::default(cx.editor.config.clone(), cx.editor.syn_loader.clone());
+    let callback = crate::job::Callback::EditorCompositor(Box::new(
+        move |editor: &mut Editor, compositor: &mut Compositor| {
+            if let Some(tab_mgr) = compositor.find::<crate::ui::TabManager>() {
+                tab_mgr.new_editor_tab(doc, editor);
+            }
+        },
+    ));
+    cx.jobs.callback(async { Ok(callback) });
 
     Ok(())
 }
@@ -306,11 +231,11 @@ fn quit_all_impl(cx: &mut compositor::Context, force: bool) -> anyhow::Result<()
         buffers_remaining_impl(cx.editor)?;
     }
 
-    // close all views
-    let views: Vec<_> = cx.editor.tree.views().map(|(view, _)| view.id).collect();
-    for view_id in views {
-        cx.editor.close(view_id);
-    }
+    // Save session before clearing tabs
+    crate::session::save_session(cx.editor);
+    // Close all tabs to exit
+    cx.editor.tabs.clear();
+    cx.editor.active_tab = 0;
 
     Ok(())
 }
@@ -763,47 +688,37 @@ fn reload_all(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> 
     let scrolloff = cx.editor.config().scrolloff;
     let view_id = view!(cx.editor).id;
 
-    let docs_view_ids: Vec<(DocumentId, Vec<ViewId>)> = cx
-        .editor
-        .documents_mut()
-        .map(|doc| {
-            let mut view_ids: Vec<_> = doc.selections().keys().cloned().collect();
-
-            if view_ids.is_empty() {
-                doc.ensure_view_init(view_id);
-                view_ids.push(view_id);
-            };
-
-            (doc.id(), view_ids)
-        })
-        .collect();
-
-    for (doc_id, view_ids) in docs_view_ids {
-        let doc = doc_mut!(cx.editor, &doc_id);
-
-        // Every doc is guaranteed to have at least 1 view at this point.
-        let view = view_mut!(cx.editor, view_ids[0]);
-
-        // Ensure that the view is synced with the document's history.
-        view.sync_changes(doc);
-
-        if let Err(error) = doc.reload(view, &cx.editor.diff_providers) {
-            cx.editor.set_error(format!("{}", error));
-            continue;
+    {
+        let doc = doc_mut!(cx.editor);
+        let mut view_ids: Vec<_> = doc.selections().keys().cloned().collect();
+        if view_ids.is_empty() {
+            doc.ensure_view_init(view_id);
+            view_ids.push(view_id);
         }
 
-        if let Some(path) = doc.path() {
+        {
+            let dv = &mut cx.editor.tabs[cx.editor.active_tab];
+            let view = dv.tree.get_mut(view_ids[0]);
+            view.sync_changes(&mut dv.doc);
+
+            let diff_providers = &cx.editor.diff_providers;
+            if let Err(error) = dv.doc.reload(dv.tree.get_mut(view_ids[0]), diff_providers) {
+                cx.editor.set_error(format!("{}", error));
+                return Ok(());
+            }
+        }
+
+        if let Some(path) = cx.editor.tabs[cx.editor.active_tab].doc.path() {
             cx.editor
                 .language_servers
                 .file_event_handler
                 .file_changed(path.clone());
         }
 
-        for view_id in view_ids {
-            let view = view_mut!(cx.editor, view_id);
-            if view.doc.eq(&doc_id) {
-                view.ensure_cursor_in_view(doc, scrolloff);
-            }
+        for vid in view_ids {
+            let dv = &mut cx.editor.tabs[cx.editor.active_tab];
+            let view = dv.tree.get_mut(vid);
+            view.ensure_cursor_in_view(&mut dv.doc, scrolloff);
         }
     }
 
@@ -964,26 +879,18 @@ fn lsp_restart(cx: &mut compositor::Context, args: Args, event: PromptEvent) -> 
         }
     }
 
-    // This collect is needed because refresh_language_server would need to re-borrow editor.
-    let document_ids_to_refresh: Vec<DocumentId> = cx
-        .editor
-        .documents()
-        .filter_map(|doc| match doc.language_config() {
-            Some(config)
-                if config.language_servers.iter().any(|ls| {
-                    language_servers
-                        .iter()
-                        .any(|restarted_ls| restarted_ls == &ls.name)
-                }) =>
-            {
-                Some(doc.id())
-            }
-            _ => None,
+    // Refresh language servers for the single document if applicable.
+    let should_refresh = cx.editor.tabs[cx.editor.active_tab].doc.language_config().map_or(false, |config| {
+        config.language_servers.iter().any(|ls| {
+            language_servers
+                .iter()
+                .any(|restarted_ls| restarted_ls == &ls.name)
         })
-        .collect();
+    });
 
-    for document_id in document_ids_to_refresh {
-        cx.editor.refresh_language_servers(document_id);
+    if should_refresh {
+        let doc_id = cx.editor.tabs[cx.editor.active_tab].doc.id();
+        cx.editor.refresh_language_servers(doc_id);
     }
 
     if errors.is_empty() {
@@ -1023,12 +930,11 @@ fn lsp_stop(cx: &mut compositor::Context, args: Args, event: PromptEvent) -> any
     for ls_name in &language_servers {
         cx.editor.language_servers.stop(ls_name);
 
-        for doc in cx.editor.documents_mut() {
-            if let Some(client) = doc.remove_language_server_by_name(ls_name) {
-                doc.clear_diagnostics_for_language_server(client.id());
-                doc.reset_all_inlay_hints();
-                doc.inlay_hints_oudated = true;
-            }
+        let doc = &mut cx.editor.tabs[cx.editor.active_tab].doc;
+        if let Some(client) = doc.remove_language_server_by_name(ls_name) {
+            doc.clear_diagnostics_for_language_server(client.id());
+            doc.reset_all_inlay_hints();
+            doc.inlay_hints_oudated = true;
         }
     }
 
@@ -1219,7 +1125,16 @@ fn vsplit_new(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> 
         return Ok(());
     }
 
-    cx.editor.new_file(Action::VerticalSplit);
+    // In read-only viewer, create a new tab with an empty document
+    let doc = Document::default(cx.editor.config.clone(), cx.editor.syn_loader.clone());
+    let callback = crate::job::Callback::EditorCompositor(Box::new(
+        move |editor: &mut Editor, compositor: &mut Compositor| {
+            if let Some(tab_mgr) = compositor.find::<crate::ui::TabManager>() {
+                tab_mgr.new_editor_tab(doc, editor);
+            }
+        },
+    ));
+    cx.jobs.callback(async { Ok(callback) });
 
     Ok(())
 }
@@ -1229,7 +1144,16 @@ fn hsplit_new(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> 
         return Ok(());
     }
 
-    cx.editor.new_file(Action::HorizontalSplit);
+    // In read-only viewer, create a new tab with an empty document
+    let doc = Document::default(cx.editor.config.clone(), cx.editor.syn_loader.clone());
+    let callback = crate::job::Callback::EditorCompositor(Box::new(
+        move |editor: &mut Editor, compositor: &mut Compositor| {
+            if let Some(tab_mgr) = compositor.find::<crate::ui::TabManager>() {
+                tab_mgr.new_editor_tab(doc, editor);
+            }
+        },
+    ));
+    cx.jobs.callback(async { Ok(callback) });
 
     Ok(())
 }
@@ -1240,14 +1164,28 @@ fn tutor(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> anyho
     }
 
     let path = helix_loader::runtime_file(Path::new("tutor"));
-    cx.editor.open(&path, Action::Replace)?;
+    let mut doc = Document::open(
+        &path,
+        None,
+        true,
+        cx.editor.config.clone(),
+        cx.editor.syn_loader.clone(),
+    )?;
     // Unset path to prevent accidentally saving to the original tutor file.
-    doc_mut!(cx.editor).set_path(None);
+    doc.set_path(None);
+    let callback = crate::job::Callback::EditorCompositor(Box::new(
+        move |editor: &mut Editor, compositor: &mut Compositor| {
+            if let Some(tab_mgr) = compositor.find::<crate::ui::TabManager>() {
+                tab_mgr.new_editor_tab(doc, editor);
+            }
+        },
+    ));
+    cx.jobs.callback(async { Ok(callback) });
     Ok(())
 }
 
 fn abort_goto_line_number_preview(cx: &mut compositor::Context) {
-    if let Some(last_selection) = cx.editor.last_selection.take() {
+    if let Some(last_selection) = cx.editor.tabs[cx.editor.active_tab].last_selection.take() {
         let scrolloff = cx.editor.config().scrolloff;
 
         let (view, doc) = current!(cx.editor);
@@ -1257,17 +1195,18 @@ fn abort_goto_line_number_preview(cx: &mut compositor::Context) {
 }
 
 fn update_goto_line_number_preview(cx: &mut compositor::Context, args: Args) -> anyhow::Result<()> {
-    cx.editor.last_selection.get_or_insert_with(|| {
+    if cx.editor.tabs[cx.editor.active_tab].last_selection.is_none() {
         let (view, doc) = current!(cx.editor);
-        doc.selection(view.id).clone()
-    });
+        let sel = doc.selection(view.id).clone();
+        cx.editor.tabs[cx.editor.active_tab].last_selection = Some(sel);
+    }
 
     let scrolloff = cx.editor.config().scrolloff;
     let line = args[0].parse::<usize>()?;
     goto_line_without_jumplist(
         cx.editor,
         NonZeroUsize::new(line),
-        if cx.editor.mode == Mode::Select {
+        if cx.editor.mode() == Mode::Select {
             Movement::Extend
         } else {
             Movement::Move
@@ -1295,6 +1234,7 @@ pub(super) fn goto_line_number(
 
             let last_selection = cx
                 .editor
+                .tabs[cx.editor.active_tab]
                 .last_selection
                 .take()
                 .expect("update_goto_line_number_preview should always set last_selection");
@@ -1537,8 +1477,22 @@ fn open_config(
         return Ok(());
     }
 
-    cx.editor
-        .open(&helix_loader::config_file(), Action::Replace)?;
+    let path = helix_loader::config_file();
+    let doc = Document::open(
+        &path,
+        None,
+        true,
+        cx.editor.config.clone(),
+        cx.editor.syn_loader.clone(),
+    )?;
+    let callback = crate::job::Callback::EditorCompositor(Box::new(
+        move |editor: &mut Editor, compositor: &mut Compositor| {
+            if let Some(tab_mgr) = compositor.find::<crate::ui::TabManager>() {
+                tab_mgr.new_editor_tab(doc, editor);
+            }
+        },
+    ));
+    cx.jobs.callback(async { Ok(callback) });
     Ok(())
 }
 
@@ -1551,8 +1505,22 @@ fn open_workspace_config(
         return Ok(());
     }
 
-    cx.editor
-        .open(&helix_loader::workspace_config_file(), Action::Replace)?;
+    let path = helix_loader::workspace_config_file();
+    let doc = Document::open(
+        &path,
+        None,
+        true,
+        cx.editor.config.clone(),
+        cx.editor.syn_loader.clone(),
+    )?;
+    let callback = crate::job::Callback::EditorCompositor(Box::new(
+        move |editor: &mut Editor, compositor: &mut Compositor| {
+            if let Some(tab_mgr) = compositor.find::<crate::ui::TabManager>() {
+                tab_mgr.new_editor_tab(doc, editor);
+            }
+        },
+    ));
+    cx.jobs.callback(async { Ok(callback) });
     Ok(())
 }
 
@@ -1561,7 +1529,22 @@ fn open_log(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> an
         return Ok(());
     }
 
-    cx.editor.open(&helix_loader::log_file(), Action::Replace)?;
+    let path = helix_loader::log_file();
+    let doc = Document::open(
+        &path,
+        None,
+        true,
+        cx.editor.config.clone(),
+        cx.editor.syn_loader.clone(),
+    )?;
+    let callback = crate::job::Callback::EditorCompositor(Box::new(
+        move |editor: &mut Editor, compositor: &mut Compositor| {
+            if let Some(tab_mgr) = compositor.find::<crate::ui::TabManager>() {
+                tab_mgr.new_editor_tab(doc, editor);
+            }
+        },
+    ));
+    cx.jobs.callback(async { Ok(callback) });
     Ok(())
 }
 
@@ -1659,16 +1642,6 @@ fn noop(_cx: &mut compositor::Context, _args: Args, _event: PromptEvent) -> anyh
 }
 
 /// This command accepts a single boolean --skip-visible flag and no positionals.
-const BUFFER_CLOSE_OTHERS_SIGNATURE: Signature = Signature {
-    positionals: (0, Some(0)),
-    flags: &[Flag {
-        name: "skip-visible",
-        alias: Some('s'),
-        doc: "don't close buffers that are visible",
-        ..Flag::DEFAULT
-    }],
-    ..Signature::DEFAULT
-};
 
 // TODO: SHELL_SIGNATURE should specify var args for arguments, so that just completers::filename can be used,
 // but Signature does not yet allow for var args.
@@ -1711,29 +1684,10 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         },
     },
     TypableCommand {
-        name: "buffer-close",
-        aliases: &["bc", "bclose"],
-        doc: "Close the current buffer.",
-        fun: buffer_close,
-        completer: CommandCompleter::all(completers::buffer),
-        signature: Signature {
-            positionals: (0, None),
-            ..Signature::DEFAULT
-        },
-    },
-    TypableCommand {
-        name: "buffer-close-others",
-        aliases: &["bco", "bcloseother"],
-        doc: "Close all buffers but the currently focused one.",
-        fun: buffer_close_others,
-        completer: CommandCompleter::none(),
-        signature: BUFFER_CLOSE_OTHERS_SIGNATURE,
-    },
-    TypableCommand {
-        name: "buffer-close-all",
-        aliases: &["bca", "bcloseall"],
-        doc: "Close all buffers without quitting.",
-        fun: buffer_close_all,
+        name: "tab-close",
+        aliases: &["tc", "tabclose"],
+        doc: "Close the current tab.",
+        fun: tab_close,
         completer: CommandCompleter::none(),
         signature: Signature {
             positionals: (0, Some(0)),
@@ -1741,10 +1695,10 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         },
     },
     TypableCommand {
-        name: "buffer-next",
-        aliases: &["bn", "bnext"],
-        doc: "Goto next buffer.",
-        fun: buffer_next,
+        name: "tab-close-others",
+        aliases: &["tco"],
+        doc: "Close all tabs but the currently focused one.",
+        fun: tab_close_others,
         completer: CommandCompleter::none(),
         signature: Signature {
             positionals: (0, Some(0)),
@@ -1752,10 +1706,32 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         },
     },
     TypableCommand {
-        name: "buffer-previous",
-        aliases: &["bp", "bprev"],
-        doc: "Goto previous buffer.",
-        fun: buffer_previous,
+        name: "tab-close-all",
+        aliases: &["tca"],
+        doc: "Close all tabs.",
+        fun: tab_close_all,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "tab-next",
+        aliases: &["tn", "tabnext"],
+        doc: "Goto next tab.",
+        fun: tab_next,
+        completer: CommandCompleter::none(),
+        signature: Signature {
+            positionals: (0, Some(0)),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "tab-previous",
+        aliases: &["tp", "tabprev"],
+        doc: "Goto previous tab.",
+        fun: tab_previous,
         completer: CommandCompleter::none(),
         signature: Signature {
             positionals: (0, Some(0)),

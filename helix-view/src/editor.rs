@@ -1,31 +1,29 @@
 use crate::{
     annotations::diagnostics::{DiagnosticFilter, InlineDiagnosticsConfig},
     clipboard::ClipboardProvider,
-    document::{DocumentOpenError, DocumentSavedEventFuture, DocumentSavedEventResult, Mode},
-    events::{DocumentDidClose, DocumentDidOpen, DocumentFocusLost},
+    doc_view::DocView,
+    document::Mode,
+    events::DocumentFocusLost,
     graphics::{CursorKind, Rect},
     handlers::Handlers,
     info::Info,
     register::Registers,
     theme::{self, Theme},
-    tree::{self, Tree},
-    Document, DocumentId, View, ViewId,
+    tree,
+    Document, AppId, View, ViewId,
 };
 use helix_event::dispatch;
 use helix_vcs::DiffProviderRegistry;
 
-use futures_util::stream::select_all::SelectAll;
 use futures_util::{future, StreamExt};
 use helix_lsp::{Call, LanguageServerId};
-use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use std::{
     borrow::Cow,
     cell::Cell,
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
-    fs,
-    io::{self, stdin},
-    num::{NonZeroU8, NonZeroUsize},
+    fs, io,
+    num::NonZeroU8,
     path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
@@ -35,8 +33,6 @@ use tokio::{
     sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
     time::{sleep, Duration, Instant, Sleep},
 };
-
-use anyhow::{anyhow, bail, Error};
 
 pub use helix_core::diagnostic::Severity;
 use helix_core::{
@@ -48,7 +44,6 @@ use helix_core::{
     LineEnding, Position, Range, Selection, Uri, NATIVE_LINE_ENDING,
 };
 use helix_lsp::lsp;
-use helix_stdx::path::canonicalize;
 
 use serde::{ser::SerializeMap, Deserialize, Deserializer, Serialize, Serializer};
 
@@ -381,6 +376,8 @@ pub struct Config {
     pub editor_config: bool,
     /// Whether to render rainbow colors for matching brackets. Defaults to `false`.
     pub rainbow_brackets: bool,
+    /// Whether to display nerdfont icons in buffer tabs and file pickers. Defaults to `false`.
+    pub icons: bool,
     /// Whether to enable Kitty Keyboard Protocol
     pub kitty_keyboard_protocol: KittyKeyboardProtocolConfig,
     pub buffer_picker: BufferPickerConfig,
@@ -1021,6 +1018,7 @@ impl Default for Config {
             clipboard_provider: ClipboardProvider::default(),
             editor_config: true,
             rainbow_brackets: false,
+            icons: false,
             kitty_keyboard_protocol: Default::default(),
             buffer_picker: BufferPickerConfig::default(),
         }
@@ -1036,22 +1034,13 @@ impl Default for SearchConfig {
     }
 }
 
-use futures_util::stream::{Flatten, Once};
-
 type Diagnostics = BTreeMap<Uri, Vec<(lsp::Diagnostic, DiagnosticProvider)>>;
 
 pub struct Editor {
-    /// Current editing mode.
-    pub mode: Mode,
-    pub tree: Tree,
-    pub next_document_id: DocumentId,
-    pub documents: BTreeMap<DocumentId, Document>,
-
-    // We Flatten<> to resolve the inner DocumentSavedEventFuture. For that we need a stream of streams, hence the Once<>.
-    // https://stackoverflow.com/a/66875668
-    pub saves: HashMap<DocumentId, UnboundedSender<Once<DocumentSavedEventFuture>>>,
-    pub save_queue: SelectAll<Flatten<UnboundedReceiverStream<Once<DocumentSavedEventFuture>>>>,
-    pub write_count: usize,
+    /// Per-tab state: each tab owns a document, view tree, mode, etc.
+    pub tabs: Vec<DocView>,
+    /// Index of the currently active tab.
+    pub active_tab: usize,
 
     pub count: Option<std::num::NonZeroUsize>,
     pub registers: Registers,
@@ -1068,15 +1057,10 @@ pub struct Editor {
     /// is set here.
     pub theme: Theme,
 
-    /// The primary Selection prior to starting a goto_line_number preview. This is
-    /// restored when the preview is aborted, or added to the jumplist when it is
-    /// confirmed.
-    pub last_selection: Option<Selection>,
-
     pub status_msg: Option<(Cow<'static, str>, Severity)>,
     pub autoinfo: Option<Info>,
 
-    pub config: Arc<dyn DynAccess<Config>>,
+    pub config: Arc<dyn DynAccess<Config> + Send + Sync>,
 
     pub idle_timer: Pin<Box<Sleep>>,
     redraw_timer: Pin<Box<Sleep>>,
@@ -1088,29 +1072,13 @@ pub struct Editor {
 
     pub config_events: (UnboundedSender<ConfigEvent>, UnboundedReceiver<ConfigEvent>),
     pub needs_redraw: bool,
-    /// Cached position of the cursor calculated during rendering.
-    /// The content of `cursor_cache` is returned by `Editor::cursor` if
-    /// set to `Some(_)`. The value will be cleared after it's used.
-    /// If `cursor_cache` is `None` then the `Editor::cursor` function will
-    /// calculate the cursor position.
-    ///
-    /// `Some(None)` represents a cursor position outside of the visible area.
-    /// This will just cause `Editor::cursor` to return `None`.
-    ///
-    /// This cache is only a performance optimization to
-    /// avoid calculating the cursor position multiple
-    /// times during rendering and should not be set by other functions.
     pub handlers: Handlers,
-
-    pub mouse_down_range: Option<Range>,
-    pub cursor_cache: CursorCache,
 }
 
 pub type Motion = Box<dyn Fn(&mut Editor)>;
 
 #[derive(Debug)]
 pub enum EditorEvent {
-    DocumentSaved(DocumentSavedEventResult),
     ConfigEvent(ConfigEvent),
     LanguageServerMessage((LanguageServerId, Call)),
     IdleTimer,
@@ -1139,7 +1107,7 @@ pub enum Action {
 
 impl Action {
     /// Whether to align the view to the cursor after executing this action
-    pub fn align_view(&self, view: &View, new_doc: DocumentId) -> bool {
+    pub fn align_view(&self, view: &View, new_doc: AppId) -> bool {
         !matches!((self, view.doc == new_doc), (Action::Load, false))
     }
 }
@@ -1159,7 +1127,7 @@ impl Editor {
         mut area: Rect,
         theme_loader: Arc<theme::Loader>,
         syn_loader: Arc<ArcSwap<syntax::Loader>>,
-        config: Arc<dyn DynAccess<Config>>,
+        config: Arc<dyn DynAccess<Config> + Send + Sync>,
         handlers: Handlers,
     ) -> Self {
         let language_servers = helix_lsp::Registry::new(syn_loader.clone());
@@ -1168,13 +1136,8 @@ impl Editor {
         area.height -= 1;
 
         Self {
-            mode: Mode::Normal,
-            tree: Tree::new(area),
-            next_document_id: DocumentId::default(),
-            documents: BTreeMap::new(),
-            saves: HashMap::new(),
-            save_queue: SelectAll::new(),
-            write_count: 0,
+            tabs: Vec::new(),
+            active_tab: 0,
             count: None,
             theme: theme_loader.default(),
             language_servers,
@@ -1183,7 +1146,6 @@ impl Editor {
             syn_loader,
             theme_loader,
             last_theme: None,
-            last_selection: None,
             registers: Registers::new(Box::new(arc_swap::access::Map::new(
                 Arc::clone(&config),
                 |config: &Config| &config.clipboard_provider,
@@ -1199,8 +1161,6 @@ impl Editor {
             config_events: unbounded_channel(),
             needs_redraw: false,
             handlers,
-            mouse_down_range: None,
-            cursor_cache: CursorCache::default(),
             dir_stack: VecDeque::with_capacity(DIR_STACK_CAP),
         }
     }
@@ -1230,7 +1190,65 @@ impl Editor {
     }
     /// Current editing mode for the [`Editor`].
     pub fn mode(&self) -> Mode {
-        self.mode
+        if self.tabs.is_empty() {
+            return Mode::Normal;
+        }
+        self.tabs[self.active_tab].mode
+    }
+
+    pub fn add_tab(&mut self, dv: DocView) -> usize {
+        self.tabs.push(dv);
+        let index = self.tabs.len() - 1;
+        self.active_tab = index;
+        let doc_id = self.tabs[index].doc.id();
+        self.launch_language_servers(doc_id);
+        index
+    }
+
+    pub fn close_tab(&mut self, index: usize) -> bool {
+        if index >= self.tabs.len() {
+            return self.tabs.is_empty();
+        }
+        self.tabs.remove(index);
+        if self.tabs.is_empty() {
+            return true;
+        }
+        if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len() - 1;
+        } else if self.active_tab > index {
+            self.active_tab -= 1;
+        }
+        false
+    }
+
+    pub fn next_tab(&mut self) {
+        if !self.tabs.is_empty() {
+            self.active_tab = (self.active_tab + 1) % self.tabs.len();
+        }
+    }
+
+    pub fn prev_tab(&mut self) {
+        if !self.tabs.is_empty() {
+            self.active_tab = if self.active_tab == 0 {
+                self.tabs.len() - 1
+            } else {
+                self.active_tab - 1
+            };
+        }
+    }
+
+    pub fn activate_tab(&mut self, index: usize) {
+        if index < self.tabs.len() {
+            self.active_tab = index;
+        }
+    }
+
+    pub fn tab_count(&self) -> usize {
+        self.tabs.len()
+    }
+
+    pub fn active_index(&self) -> usize {
+        self.active_tab
     }
 
     pub fn config(&self) -> DynGuard<Config> {
@@ -1354,14 +1372,14 @@ impl Editor {
     }
 
     /// Refreshes the language server for a given document
-    pub fn refresh_language_servers(&mut self, doc_id: DocumentId) {
+    pub fn refresh_language_servers(&mut self, doc_id: AppId) {
         self.launch_language_servers(doc_id)
     }
 
     /// moves/renames a path, invoking any event handlers (currently only lsp)
     /// and calling `set_doc_path` if the file is open in the editor
     pub fn move_path(&mut self, old_path: &Path, new_path: &Path) -> io::Result<()> {
-        let new_path = canonicalize(new_path);
+        let new_path = helix_stdx::path::canonicalize(new_path);
         // sanity check
         if old_path == new_path {
             return Ok(());
@@ -1393,8 +1411,11 @@ impl Editor {
             fs::rename(old_path, &new_path)?;
         }
 
-        if let Some(doc) = self.document_by_path(old_path) {
-            self.set_doc_path(doc.id(), &new_path);
+        // Check if the current doc matches the old path
+        let matches = self.tabs[self.active_tab].doc.path().map(|p| p == old_path).unwrap_or(false);
+        if matches {
+            let doc_id = self.tabs[self.active_tab].doc.id();
+            self.set_doc_path(doc_id, &new_path);
         }
         let is_dir = new_path.is_dir();
         for ls in self.language_servers.iter_clients() {
@@ -1414,8 +1435,8 @@ impl Editor {
         Ok(())
     }
 
-    pub fn set_doc_path(&mut self, doc_id: DocumentId, path: &Path) {
-        let doc = doc_mut!(self, &doc_id);
+    pub fn set_doc_path(&mut self, doc_id: AppId, path: &Path) {
+        let doc = &mut self.tabs[self.active_tab].doc;
         let old_path = doc.path();
 
         if let Some(old_path) = old_path {
@@ -1439,28 +1460,26 @@ impl Editor {
         self.refresh_doc_language(doc_id)
     }
 
-    pub fn refresh_doc_language(&mut self, doc_id: DocumentId) {
+    pub fn refresh_doc_language(&mut self, doc_id: AppId) {
         let loader = self.syn_loader.load();
-        let doc = doc_mut!(self, &doc_id);
+        let doc = &mut self.tabs[self.active_tab].doc;
         doc.detect_language(&loader);
         doc.detect_editor_config();
         doc.detect_indent_and_line_ending();
         self.refresh_language_servers(doc_id);
-        let doc = doc_mut!(self, &doc_id);
+        let doc = &mut self.tabs[self.active_tab].doc;
         let diagnostics = Editor::doc_diagnostics(&self.language_servers, &self.diagnostics, doc);
         doc.replace_diagnostics(diagnostics, &[], None);
         doc.reset_all_inlay_hints();
     }
 
     /// Launch a language server for a given document
-    fn launch_language_servers(&mut self, doc_id: DocumentId) {
+    pub fn launch_language_servers(&mut self, _doc_id: AppId) {
         if !self.config().lsp.enable {
             return;
         }
         // if doc doesn't have a URL it's a scratch buffer, ignore it
-        let Some(doc) = self.documents.get_mut(&doc_id) else {
-            return;
-        };
+        let doc = &mut self.tabs[self.active_tab].doc;
         let Some(doc_url) = doc.url() else {
             return;
         };
@@ -1531,403 +1550,81 @@ impl Editor {
         doc.language_servers = language_servers;
     }
 
-    fn _refresh(&mut self) {
-        let config = self.config();
+    /// Close a view by removing it from the tree. If the tree becomes empty,
+    /// remove the tab entirely.
+    pub fn close(&mut self, view_id: ViewId) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        self.tabs[self.active_tab].tree.remove(view_id);
+        // If tree has no views left, remove the tab
+        if self.tabs[self.active_tab].tree.views().count() == 0 {
+            self.close_tab(self.active_tab);
+        } else {
+            self._refresh();
+        }
+    }
 
-        // Reset the inlay hints annotations *before* updating the views, that way we ensure they
-        // will disappear during the `.sync_change(doc)` call below.
-        //
-        // We can't simply check this config when rendering because inlay hints are only parts of
-        // the possible annotations, and others could still be active, so we need to selectively
-        // drop the inlay hints.
+    fn _refresh(&mut self) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        let config = self.config();
+        let dv = &mut self.tabs[self.active_tab];
+
         if !config.lsp.display_inlay_hints {
-            for doc in self.documents_mut() {
-                doc.reset_all_inlay_hints();
-            }
+            dv.doc.reset_all_inlay_hints();
         }
 
-        for (view, _) in self.tree.views_mut() {
-            let doc = doc_mut!(self, &view.doc);
+        for (view, _) in dv.tree.views_mut() {
+            let doc = &mut dv.doc;
             view.sync_changes(doc);
             view.gutters = config.gutters.clone();
             view.ensure_cursor_in_view(doc, config.scrolloff)
         }
     }
 
-    fn replace_document_in_view(&mut self, current_view: ViewId, doc_id: DocumentId) {
-        let scrolloff = self.config().scrolloff;
-        let view = self.tree.get_mut(current_view);
-
-        view.doc = doc_id;
-        let doc = doc_mut!(self, &doc_id);
-
-        doc.ensure_view_init(view.id);
-        view.sync_changes(doc);
-        doc.mark_as_focused();
-
-        view.ensure_cursor_in_view(doc, scrolloff)
-    }
-
-    pub fn switch(&mut self, id: DocumentId, action: Action) {
-        use crate::tree::Layout;
-
-        if !self.documents.contains_key(&id) {
-            log::error!("cannot switch to document that does not exist (anymore)");
+    pub fn resize(&mut self, area: Rect) {
+        if self.tabs.is_empty() {
             return;
         }
-
-        if !matches!(action, Action::Load) {
-            self.enter_normal_mode();
-        }
-
-        let focust_lost = match action {
-            Action::Replace => {
-                let (view, doc) = current_ref!(self);
-                // If the current view is an empty scratch buffer and is not displayed in any other views, delete it.
-                // Boolean value is determined before the call to `view_mut` because the operation requires a borrow
-                // of `self.tree`, which is mutably borrowed when `view_mut` is called.
-                let remove_empty_scratch = doc.path().is_none()
-                    // If the buffer we are changing to is not this buffer
-                    && id != doc.id
-                    // Ensure the buffer is not displayed in any other splits.
-                    && !self
-                        .tree
-                        .traverse()
-                        .any(|(_, v)| v.doc == doc.id && v.id != view.id);
-
-                let (view, doc) = current!(self);
-                let view_id = view.id;
-
-                // Append any outstanding changes to history in the old document.
-                doc.append_changes_to_history(view);
-
-                if remove_empty_scratch {
-                    // Copy `doc.id` into a variable before calling `self.documents.remove`, which requires a mutable
-                    // borrow, invalidating direct access to `doc.id`.
-                    let id = doc.id;
-                    self.documents.remove(&id);
-
-                    // Remove the scratch buffer from any jumplists
-                    for (view, _) in self.tree.views_mut() {
-                        view.remove_document(&id);
-                    }
-                } else {
-                    let jump = (view.doc, doc.selection(view.id).clone());
-                    view.jumps.push(jump);
-                    // Set last accessed doc if it is a different document
-                    if doc.id != id {
-                        view.add_to_history(view.doc);
-                        // Set last modified doc if modified and last modified doc is different
-                        if std::mem::take(&mut doc.modified_since_accessed)
-                            && view.last_modified_docs[0] != Some(view.doc)
-                        {
-                            view.last_modified_docs = [Some(view.doc), view.last_modified_docs[0]];
-                        }
-                    }
-                }
-
-                self.replace_document_in_view(view_id, id);
-
-                dispatch(DocumentFocusLost {
-                    editor: self,
-                    doc: id,
-                });
-                return;
-            }
-            Action::Load => {
-                let view_id = view!(self).id;
-                let doc = doc_mut!(self, &id);
-                doc.ensure_view_init(view_id);
-                doc.mark_as_focused();
-                return;
-            }
-            Action::HorizontalSplit | Action::VerticalSplit => {
-                let focus_lost = self.tree.try_get(self.tree.focus).map(|view| view.doc);
-                // copy the current view, unless there is no view yet
-                let view = self
-                    .tree
-                    .try_get(self.tree.focus)
-                    .filter(|v| id == v.doc) // Different Document
-                    .cloned()
-                    .unwrap_or_else(|| View::new(id, self.config().gutters.clone()));
-                let view_id = self.tree.split(
-                    view,
-                    match action {
-                        Action::HorizontalSplit => Layout::Horizontal,
-                        Action::VerticalSplit => Layout::Vertical,
-                        _ => unreachable!(),
-                    },
-                );
-                // initialize selection for view
-                let doc = doc_mut!(self, &id);
-                doc.ensure_view_init(view_id);
-                doc.mark_as_focused();
-                focus_lost
-            }
-        };
-
-        self._refresh();
-        if let Some(focus_lost) = focust_lost {
-            dispatch(DocumentFocusLost {
-                editor: self,
-                doc: focus_lost,
-            });
-        }
-    }
-
-    /// Generate an id for a new document and register it.
-    fn new_document(&mut self, mut doc: Document) -> DocumentId {
-        let id = self.next_document_id;
-        // Safety: adding 1 from 1 is fine, practically impossible to reach usize max
-        self.next_document_id =
-            DocumentId(unsafe { NonZeroUsize::new_unchecked(self.next_document_id.0.get() + 1) });
-        doc.id = id;
-        self.documents.insert(id, doc);
-
-        let (save_sender, save_receiver) = tokio::sync::mpsc::unbounded_channel();
-        self.saves.insert(id, save_sender);
-
-        let stream = UnboundedReceiverStream::new(save_receiver).flatten();
-        self.save_queue.push(stream);
-
-        id
-    }
-
-    pub fn new_file_from_document(&mut self, action: Action, doc: Document) -> DocumentId {
-        let id = self.new_document(doc);
-
-        helix_event::dispatch(DocumentDidOpen {
-            editor: self,
-            doc: id,
-        });
-
-        self.switch(id, action);
-        id
-    }
-
-    pub fn new_file(&mut self, action: Action) -> DocumentId {
-        self.new_file_from_document(
-            action,
-            Document::default(self.config.clone(), self.syn_loader.clone()),
-        )
-    }
-
-    pub fn new_file_from_stdin(&mut self, action: Action) -> Result<DocumentId, Error> {
-        let (stdin, encoding, has_bom) = crate::document::read_to_string(&mut stdin(), None)?;
-        let doc = Document::from(
-            helix_core::Rope::default(),
-            Some((encoding, has_bom)),
-            self.config.clone(),
-            self.syn_loader.clone(),
-        );
-        let doc_id = self.new_file_from_document(action, doc);
-        let doc = doc_mut!(self, &doc_id);
-        let view = view_mut!(self);
-        doc.ensure_view_init(view.id);
-        let transaction =
-            helix_core::Transaction::insert(doc.text(), doc.selection(view.id), stdin.into())
-                .with_selection(Selection::point(0));
-        doc.apply(&transaction, view.id);
-        doc.append_changes_to_history(view);
-        Ok(doc_id)
-    }
-
-    pub fn document_id_by_path(&self, path: &Path) -> Option<DocumentId> {
-        self.document_by_path(path).map(|doc| doc.id)
-    }
-
-    // ??? possible use for integration tests
-    pub fn open(&mut self, path: &Path, action: Action) -> Result<DocumentId, DocumentOpenError> {
-        let path = helix_stdx::path::canonicalize(path);
-        let id = self.document_id_by_path(&path);
-
-        let id = if let Some(id) = id {
-            id
-        } else {
-            let mut doc = Document::open(
-                &path,
-                None,
-                true,
-                self.config.clone(),
-                self.syn_loader.clone(),
-            )?;
-
-            let diagnostics =
-                Editor::doc_diagnostics(&self.language_servers, &self.diagnostics, &doc);
-            doc.replace_diagnostics(diagnostics, &[], None);
-
-            if let Some(diff_base) = self.diff_providers.get_diff_base(&path) {
-                doc.set_diff_base(diff_base);
-            }
-            if let Some((head, worktree)) = self.diff_providers.get_repo_info(&path) {
-                doc.set_version_control_head(Some(head));
-                doc.set_worktree_name(worktree);
-            }
-
-            let id = self.new_document(doc);
-            self.launch_language_servers(id);
-
-            helix_event::dispatch(DocumentDidOpen {
-                editor: self,
-                doc: id,
-            });
-
-            id
-        };
-
-        self.switch(id, action);
-
-        Ok(id)
-    }
-
-    pub fn close(&mut self, id: ViewId) {
-        // Remove selections for the closed view on all documents.
-        for doc in self.documents_mut() {
-            doc.remove_view(id);
-        }
-        self.tree.remove(id);
-        self._refresh();
-    }
-
-    pub fn close_document(&mut self, doc_id: DocumentId, _force: bool) -> Result<(), CloseError> {
-        let _doc = match self.documents.get(&doc_id) {
-            Some(doc) => doc,
-            None => return Err(CloseError::DoesNotExist),
-        };
-
-        // This will also disallow any follow-up writes
-        self.saves.remove(&doc_id);
-
-        enum Action {
-            Close(ViewId),
-            ReplaceDoc(ViewId, DocumentId),
-        }
-
-        let actions: Vec<Action> = self
-            .tree
-            .views_mut()
-            .filter_map(|(view, _focus)| {
-                view.remove_document(&doc_id);
-
-                if view.doc == doc_id {
-                    // something was previously open in the view, switch to previous doc
-                    if let Some(prev_doc) = view.docs_access_history.pop() {
-                        Some(Action::ReplaceDoc(view.id, prev_doc))
-                    } else {
-                        // only the document that is being closed was in the view, close it
-                        Some(Action::Close(view.id))
-                    }
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        for action in actions {
-            match action {
-                Action::Close(view_id) => {
-                    self.close(view_id);
-                }
-                Action::ReplaceDoc(view_id, doc_id) => {
-                    self.replace_document_in_view(view_id, doc_id);
-                }
-            }
-        }
-
-        let doc = self.documents.remove(&doc_id).unwrap();
-
-        // If the document we removed was visible in all views, we will have no more views. We don't
-        // want to close the editor just for a simple buffer close, so we need to create a new view
-        // containing either an existing document, or a brand new document.
-        if self.tree.views().next().is_none() {
-            let doc_id = self
-                .documents
-                .iter()
-                .map(|(&doc_id, _)| doc_id)
-                .next()
-                .unwrap_or_else(|| {
-                    self.new_document(Document::default(
-                        self.config.clone(),
-                        self.syn_loader.clone(),
-                    ))
-                });
-            let view = View::new(doc_id, self.config().gutters.clone());
-            let view_id = self.tree.insert(view);
-            let doc = doc_mut!(self, &doc_id);
-            doc.ensure_view_init(view_id);
-            doc.mark_as_focused();
-        }
-
-        self._refresh();
-
-        helix_event::dispatch(DocumentDidClose { editor: self, doc });
-
-        Ok(())
-    }
-
-    pub fn save<P: Into<PathBuf>>(
-        &mut self,
-        doc_id: DocumentId,
-        path: Option<P>,
-        force: bool,
-    ) -> anyhow::Result<()> {
-        // convert a channel of futures to pipe into main queue one by one
-        // via stream.then() ? then push into main future
-
-        let path = path.map(|path| path.into());
-        let doc = doc_mut!(self, &doc_id);
-        let doc_save_future = doc.save(path, force)?;
-
-        // When a file is written to, notify the file event handler.
-        // Note: This can be removed once proper file watching is implemented.
-        let handler = self.language_servers.file_event_handler.clone();
-        let future = async move {
-            let res = doc_save_future.await;
-            if let Ok(event) = &res {
-                handler.file_changed(event.path.clone());
-            }
-            res
-        };
-
-        use futures_util::stream;
-
-        self.saves
-            .get(&doc_id)
-            .ok_or_else(|| anyhow::format_err!("saves are closed for this document!"))?
-            .send(stream::once(Box::pin(future)))
-            .map_err(|err| anyhow!("failed to send save event: {}", err))?;
-
-        self.write_count += 1;
-
-        Ok(())
-    }
-
-    pub fn resize(&mut self, area: Rect) {
-        if self.tree.resize(area) {
+        if self.tabs[self.active_tab].tree.resize(area) {
             self._refresh();
         };
     }
 
     pub fn focus(&mut self, view_id: ViewId) {
-        if self.tree.focus == view_id {
+        if self.tabs.is_empty() {
+            return;
+        }
+        let dv = &mut self.tabs[self.active_tab];
+        if dv.tree.focus == view_id {
             return;
         }
 
         // Reset mode to normal and ensure any pending changes are committed in the old document.
         self.enter_normal_mode();
-        let (view, doc) = current!(self);
-        doc.append_changes_to_history(view);
+        {
+            let dv = &mut self.tabs[self.active_tab];
+            let view = dv.tree.get_mut(dv.tree.focus);
+            let doc = &mut dv.doc;
+            doc.append_changes_to_history(view);
+        }
         self.ensure_cursor_in_view(view_id);
         // Update jumplist selections with new document changes.
-        for (view, _focused) in self.tree.views_mut() {
-            let doc = doc_mut!(self, &view.doc);
-            view.sync_changes(doc);
+        {
+            let dv = &mut self.tabs[self.active_tab];
+            for (view, _focused) in dv.tree.views_mut() {
+                let doc = &mut dv.doc;
+                view.sync_changes(doc);
+            }
         }
 
-        let prev_id = std::mem::replace(&mut self.tree.focus, view_id);
-        doc_mut!(self).mark_as_focused();
+        let dv = &mut self.tabs[self.active_tab];
+        let prev_id = std::mem::replace(&mut dv.tree.focus, view_id);
+        dv.doc.mark_as_focused();
 
-        let focus_lost = self.tree.get(prev_id).doc;
+        let focus_lost = dv.tree.get(prev_id).doc;
         dispatch(DocumentFocusLost {
             editor: self,
             doc: focus_lost,
@@ -1935,67 +1632,42 @@ impl Editor {
     }
 
     pub fn focus_next(&mut self) {
-        self.focus(self.tree.next());
+        let next = self.tabs[self.active_tab].tree.next();
+        self.focus(next);
     }
 
     pub fn focus_prev(&mut self) {
-        self.focus(self.tree.prev());
+        let prev = self.tabs[self.active_tab].tree.prev();
+        self.focus(prev);
     }
 
     pub fn focus_direction(&mut self, direction: tree::Direction) {
-        let current_view = self.tree.focus;
-        if let Some(id) = self.tree.find_split_in_direction(current_view, direction) {
+        let current_view = self.tabs[self.active_tab].tree.focus;
+        if let Some(id) = self.tabs[self.active_tab].tree.find_split_in_direction(current_view, direction) {
             self.focus(id)
         }
     }
 
     pub fn swap_split_in_direction(&mut self, direction: tree::Direction) {
-        self.tree.swap_split_in_direction(direction);
+        self.tabs[self.active_tab].tree.swap_split_in_direction(direction);
     }
 
     pub fn transpose_view(&mut self) {
-        self.tree.transpose();
+        self.tabs[self.active_tab].tree.transpose();
     }
 
     pub fn should_close(&self) -> bool {
-        self.tree.is_empty()
+        self.tabs.is_empty()
     }
 
     pub fn ensure_cursor_in_view(&mut self, id: ViewId) {
+        if self.tabs.is_empty() {
+            return;
+        }
         let config = self.config();
-        let view = self.tree.get(id);
-        let doc = doc_mut!(self, &view.doc);
-        view.ensure_cursor_in_view(doc, config.scrolloff)
-    }
-
-    #[inline]
-    pub fn document(&self, id: DocumentId) -> Option<&Document> {
-        self.documents.get(&id)
-    }
-
-    #[inline]
-    pub fn document_mut(&mut self, id: DocumentId) -> Option<&mut Document> {
-        self.documents.get_mut(&id)
-    }
-
-    #[inline]
-    pub fn documents(&self) -> impl Iterator<Item = &Document> {
-        self.documents.values()
-    }
-
-    #[inline]
-    pub fn documents_mut(&mut self) -> impl Iterator<Item = &mut Document> {
-        self.documents.values_mut()
-    }
-
-    pub fn document_by_path<P: AsRef<Path>>(&self, path: P) -> Option<&Document> {
-        self.documents()
-            .find(|doc| doc.path().map(|p| p == path.as_ref()).unwrap_or(false))
-    }
-
-    pub fn document_by_path_mut<P: AsRef<Path>>(&mut self, path: P) -> Option<&mut Document> {
-        self.documents_mut()
-            .find(|doc| doc.path().map(|p| p == path.as_ref()).unwrap_or(false))
+        let dv = &mut self.tabs[self.active_tab];
+        let view = dv.tree.get(id);
+        view.ensure_cursor_in_view(&mut dv.doc, config.scrolloff)
     }
 
     /// Returns all supported diagnostics for the document
@@ -2054,13 +1726,17 @@ impl Editor {
     /// Gets the primary cursor position in screen coordinates,
     /// or `None` if the primary cursor is not visible on screen.
     pub fn cursor(&self) -> (Option<Position>, CursorKind) {
+        if self.tabs.is_empty() {
+            return (None, CursorKind::default());
+        }
         let config = self.config();
+        let dv = &self.tabs[self.active_tab];
         let (view, doc) = current_ref!(self);
-        if let Some(mut pos) = self.cursor_cache.get(view, doc) {
+        if let Some(mut pos) = dv.cursor_cache.get(view, doc) {
             let inner = view.inner_area(doc);
             pos.col += inner.x as usize;
             pos.row += inner.y as usize;
-            let cursorkind = config.cursor_shape.from_mode(self.mode);
+            let cursorkind = config.cursor_shape.from_mode(dv.mode);
             (Some(pos), cursorkind)
         } else {
             (None, CursorKind::default())
@@ -2100,10 +1776,6 @@ impl Editor {
             tokio::select! {
                 biased;
 
-                Some(event) = self.save_queue.next() => {
-                    self.write_count -= 1;
-                    return EditorEvent::DocumentSaved(event)
-                }
                 Some(config_event) = self.config_events.1.recv() => {
                     return EditorEvent::ConfigEvent(config_event)
                 }
@@ -2131,36 +1803,15 @@ impl Editor {
         }
     }
 
-    pub async fn flush_writes(&mut self) -> anyhow::Result<()> {
-        while self.write_count > 0 {
-            if let Some(save_event) = self.save_queue.next().await {
-                self.write_count -= 1;
-
-                let save_event = match save_event {
-                    Ok(event) => event,
-                    Err(err) => {
-                        self.set_error(err.to_string());
-                        bail!(err);
-                    }
-                };
-
-                let doc = doc_mut!(self, &save_event.doc_id);
-                doc.set_last_saved_revision(save_event.revision, save_event.save_time);
-            }
-        }
-
-        Ok(())
-    }
-
     /// Switches the editor into normal mode.
     pub fn enter_normal_mode(&mut self) {
         use helix_core::graphemes;
 
-        if self.mode == Mode::Normal {
+        if self.tabs[self.active_tab].mode == Mode::Normal {
             return;
         }
 
-        self.mode = Mode::Normal;
+        self.tabs[self.active_tab].mode = Mode::Normal;
         let (view, doc) = current!(self);
 
         try_restore_indent(doc, view);
@@ -2183,21 +1834,22 @@ impl Editor {
     }
 
     /// Returns the id of a view that this doc contains a selection for,
-    /// making sure it is synced with the current changes
-    /// if possible or there are no selections returns current_view
-    /// otherwise uses an arbitrary view
-    pub fn get_synced_view_id(&mut self, id: DocumentId) -> ViewId {
-        let current_view = view_mut!(self);
-        let doc = self.documents.get_mut(&id).unwrap();
+    /// making sure it is synced with the current changes.
+    /// If possible or there are no selections returns current_view,
+    /// otherwise uses an arbitrary view.
+    pub fn get_synced_view_id(&mut self, _id: AppId) -> ViewId {
+        let dv = &mut self.tabs[self.active_tab];
+        let current_view = dv.tree.get_mut(dv.tree.focus);
+        let doc = &mut dv.doc;
         if doc.selections().contains_key(&current_view.id) {
             // only need to sync current view if this is not the current doc
-            if current_view.doc != id {
+            if current_view.doc != _id {
                 current_view.sync_changes(doc);
             }
             current_view.id
         } else if let Some(view_id) = doc.selections().keys().next() {
             let view_id = *view_id;
-            let view = self.tree.get_mut(view_id);
+            let view = dv.tree.get_mut(view_id);
             view.sync_changes(doc);
             view_id
         } else {
@@ -2217,38 +1869,35 @@ impl Editor {
     }
 
     pub fn jump_forward(&mut self, view_id: ViewId, count: usize) {
-        if let Some((doc_id, selection)) = view_mut!(self, view_id).jumps.forward(count).cloned() {
+        if let Some((doc_id, selection)) = self.tabs[self.active_tab].tree.get_mut(view_id).jumps.forward(count).cloned() {
             self.jump_to(view_id, doc_id, selection);
         }
     }
 
     pub fn jump_backward(&mut self, view_id: ViewId, count: usize) {
-        let view = view_mut!(self, view_id);
+        let dv = &mut self.tabs[self.active_tab];
+        let view = dv.tree.get_mut(view_id);
+        let doc = &mut dv.doc;
         if let Some((doc_id, selection)) = view
             .jumps
-            .backward(view_id, doc_mut!(self, &view.doc), count)
+            .backward(view_id, doc, count)
             .cloned()
         {
             self.jump_to(view_id, doc_id, selection);
         }
     }
 
-    fn jump_to(&mut self, view_id: ViewId, dest_doc_id: DocumentId, mut selection: Selection) {
-        let view = view_mut!(self, view_id);
-        let old_doc_id = view.doc;
-        if old_doc_id != dest_doc_id {
-            let new_doc = doc_mut!(self, &dest_doc_id);
-            if let Some(transaction) = view.changes_to_sync(new_doc) {
-                let text = new_doc.text().slice(..);
-                selection = selection.map(transaction.changes()).ensure_invariants(text);
-            }
-            self.replace_document_in_view(view_id, dest_doc_id);
-            dispatch(DocumentFocusLost {
-                editor: self,
-                doc: old_doc_id,
-            });
+    fn jump_to(&mut self, view_id: ViewId, _dest_doc_id: AppId, mut selection: Selection) {
+        let dv = &mut self.tabs[self.active_tab];
+        let view = dv.tree.get_mut(view_id);
+        let doc = &mut dv.doc;
+        if let Some(transaction) = view.changes_to_sync(doc) {
+            let text = doc.text().slice(..);
+            selection = selection.map(transaction.changes()).ensure_invariants(text);
         }
-        let (view, doc) = current!(self);
+        let dv = &mut self.tabs[self.active_tab];
+        let view = dv.tree.get_mut(dv.tree.focus);
+        let doc = &mut dv.doc;
         doc.set_selection(view_id, selection);
         view.ensure_cursor_in_view_center(doc, self.config.load().scrolloff);
     }
