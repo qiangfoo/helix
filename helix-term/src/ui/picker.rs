@@ -49,7 +49,7 @@ use helix_view::{
     graphics::{CursorKind, Margin, Modifier, Rect},
     theme::Style,
     view::ViewPosition,
-    Document, DocumentId, Editor,
+    Document, AppId, Editor,
 };
 
 use self::handlers::{DynamicQueryChange, DynamicQueryHandler, PreviewHighlightHandler};
@@ -62,7 +62,7 @@ pub const MAX_FILE_SIZE_FOR_PREVIEW: u64 = 10 * 1024 * 1024;
 
 #[derive(PartialEq, Eq, Hash)]
 pub enum PathOrId<'a> {
-    Id(DocumentId),
+    Id(AppId),
     Path(&'a Path),
 }
 
@@ -72,8 +72,8 @@ impl<'a> From<&'a Path> for PathOrId<'a> {
     }
 }
 
-impl From<DocumentId> for PathOrId<'_> {
-    fn from(v: DocumentId) -> Self {
+impl From<AppId> for PathOrId<'_> {
+    fn from(v: AppId) -> Self {
         Self::Id(v)
     }
 }
@@ -609,8 +609,8 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
 
         match path_or_id {
             PathOrId::Path(path) => {
-                if let Some(doc) = editor.document_by_path(path) {
-                    return Some((Preview::EditorDocument(doc), range));
+                if editor.tabs[editor.active_tab].doc.path().map_or(false, |p| p == path) {
+                    return Some((Preview::EditorDocument(&editor.tabs[editor.active_tab].doc), range));
                 }
 
                 if self.preview_cache.contains_key(path) {
@@ -693,8 +693,11 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
                 Some((Preview::Cached(&self.preview_cache[&path]), range))
             }
             PathOrId::Id(id) => {
-                let doc = editor.documents.get(&id).unwrap();
-                Some((Preview::EditorDocument(doc), range))
+                if editor.tabs[editor.active_tab].doc.id() == id {
+                    Some((Preview::EditorDocument(&editor.tabs[editor.active_tab].doc), range))
+                } else {
+                    None
+                }
             }
         }
     }

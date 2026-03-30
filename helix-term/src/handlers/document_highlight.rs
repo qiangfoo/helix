@@ -7,19 +7,20 @@ use helix_view::{
         LanguageServerInitialized, SelectionDidChange,
     },
     handlers::Handlers,
-    DocumentId, Editor, ViewId,
+    AppId, Editor, ViewId,
 };
 
 use crate::job;
 
-fn request_document_highlights(editor: &mut Editor, doc_id: DocumentId, view_id: ViewId) {
+fn request_document_highlights(editor: &mut Editor, doc_id: AppId, view_id: ViewId) {
     if !editor.config().lsp.auto_document_highlight {
         return;
     }
 
-    let Some(doc) = editor.document_mut(doc_id) else {
+    if editor.tabs[editor.active_tab].doc.id() != doc_id {
         return;
-    };
+    }
+    let doc = &mut editor.tabs[editor.active_tab].doc;
 
     doc.ensure_view_init(view_id);
 
@@ -101,7 +102,7 @@ fn document_highlight_ranges(
 
 fn apply_document_highlights(
     editor: &mut Editor,
-    doc_id: DocumentId,
+    doc_id: AppId,
     view_id: ViewId,
     ranges: Vec<std::ops::Range<usize>>,
 ) {
@@ -109,9 +110,10 @@ fn apply_document_highlights(
         return;
     }
 
-    let Some(doc) = editor.document_mut(doc_id) else {
+    if editor.tabs[editor.active_tab].doc.id() != doc_id {
         return;
-    };
+    }
+    let doc = &mut editor.tabs[editor.active_tab].doc;
 
     if !doc.has_language_server_with_feature(LanguageServerFeature::DocumentHighlight) {
         doc.clear_document_highlights(view_id);
@@ -142,8 +144,8 @@ pub(super) fn register_hooks(_handlers: &Handlers) {
         if !event.editor.config().lsp.auto_document_highlight {
             return Ok(());
         }
-        let view_id = event.editor.tree.focus;
-        if event.editor.tree.try_get(view_id).is_none() {
+        let view_id = event.editor.tabs[event.editor.active_tab].tree.focus;
+        if event.editor.tabs[event.editor.active_tab].tree.try_get(view_id).is_none() {
             return Ok(());
         }
         request_document_highlights(event.editor, event.doc, view_id);
@@ -165,8 +167,8 @@ pub(super) fn register_hooks(_handlers: &Handlers) {
         if !event.editor.config().lsp.auto_document_highlight {
             return Ok(());
         }
-        let view_id = event.editor.tree.focus;
-        let Some(view) = event.editor.tree.try_get(view_id) else {
+        let view_id = event.editor.tabs[event.editor.active_tab].tree.focus;
+        let Some(view) = event.editor.tabs[event.editor.active_tab].tree.try_get(view_id) else {
             return Ok(());
         };
         let doc_id = view.doc;
@@ -175,10 +177,8 @@ pub(super) fn register_hooks(_handlers: &Handlers) {
     });
 
     register_hook!(move |event: &mut LanguageServerExited<'_>| {
-        for doc in event.editor.documents_mut() {
-            if doc.supports_language_server(event.server_id) {
-                doc.clear_all_document_highlights();
-            }
+        if event.editor.tabs[event.editor.active_tab].doc.supports_language_server(event.server_id) {
+            event.editor.tabs[event.editor.active_tab].doc.clear_all_document_highlights();
         }
         Ok(())
     });
@@ -187,9 +187,7 @@ pub(super) fn register_hooks(_handlers: &Handlers) {
         if event.new.lsp.auto_document_highlight {
             return Ok(());
         }
-        for doc in event.editor.documents_mut() {
-            doc.clear_all_document_highlights();
-        }
+        event.editor.tabs[event.editor.active_tab].doc.clear_all_document_highlights();
         Ok(())
     });
 }

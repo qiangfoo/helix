@@ -46,7 +46,7 @@ use crate::{
     events::{DocumentDidChange, SelectionDidChange},
     expansion,
     view::ViewPosition,
-    DocumentId, Editor, Theme, View, ViewId,
+    AppId, Editor, Theme, View, ViewId,
 };
 
 /// 8kB of buffer space for encoding and decoding `Rope`s.
@@ -110,7 +110,7 @@ impl Serialize for Mode {
 pub struct DocumentSavedEvent {
     pub revision: usize,
     pub save_time: SystemTime,
-    pub doc_id: DocumentId,
+    pub doc_id: AppId,
     pub path: PathBuf,
     pub text: Rope,
 }
@@ -143,7 +143,7 @@ pub enum DiffSource {
 }
 
 pub struct Document {
-    pub(crate) id: DocumentId,
+    pub(crate) id: AppId,
     text: Rope,
     selections: HashMap<ViewId, Selection>,
     view_data: HashMap<ViewId, ViewData>,
@@ -186,7 +186,7 @@ pub struct Document {
     // it back as it separated from the edits. We could split out the parts manually but that will
     // be more troublesome.
     pub history: Cell<History>,
-    pub config: Arc<dyn DynAccess<Config>>,
+    pub config: Arc<dyn DynAccess<Config> + Send + Sync>,
 
     savepoints: Vec<Weak<SavePoint>>,
 
@@ -361,9 +361,7 @@ impl fmt::Debug for DocumentInlayHintsId {
 
 impl Editor {
     pub(crate) fn clear_doc_relative_paths(&mut self) {
-        for doc in self.documents_mut() {
-            doc.relative_path.take();
-        }
+        self.tabs[self.active_tab].doc.relative_path.take();
     }
 }
 
@@ -715,7 +713,7 @@ impl Document {
     pub fn from(
         text: Rope,
         encoding_with_bom_info: Option<(&'static Encoding, bool)>,
-        config: Arc<dyn DynAccess<Config>>,
+        config: Arc<dyn DynAccess<Config> + Send + Sync>,
         syn_loader: Arc<ArcSwap<syntax::Loader>>,
     ) -> Self {
         let (encoding, has_bom) = encoding_with_bom_info.unwrap_or((encoding::UTF_8, false));
@@ -724,7 +722,7 @@ impl Document {
         let old_state = None;
 
         Self {
-            id: DocumentId::default(),
+            id: AppId::default(),
             path: None,
             relative_path: OnceCell::new(),
             encoding,
@@ -771,7 +769,7 @@ impl Document {
     }
 
     pub fn default(
-        config: Arc<dyn DynAccess<Config>>,
+        config: Arc<dyn DynAccess<Config> + Send + Sync>,
         syn_loader: Arc<ArcSwap<syntax::Loader>>,
     ) -> Self {
         let line_ending: LineEnding = config.load().default_line_ending.into();
@@ -786,7 +784,7 @@ impl Document {
         path: &Path,
         mut encoding: Option<&'static Encoding>,
         detect_language: bool,
-        config: Arc<dyn DynAccess<Config>>,
+        config: Arc<dyn DynAccess<Config> + Send + Sync>,
         syn_loader: Arc<ArcSwap<syntax::Loader>>,
     ) -> Result<Self, DocumentOpenError> {
         // If the path is not a regular file (e.g.: /dev/random) it should not be opened.
@@ -1725,7 +1723,7 @@ impl Document {
         view.apply(&transaction, self);
     }
 
-    pub fn id(&self) -> DocumentId {
+    pub fn id(&self) -> AppId {
         self.id
     }
 

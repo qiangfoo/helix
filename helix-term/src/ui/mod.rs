@@ -1,3 +1,4 @@
+pub mod app;
 mod document;
 pub(crate) mod editor;
 mod icons;
@@ -12,13 +13,16 @@ pub mod prompt;
 mod select;
 mod spinner;
 mod statusline;
+pub mod tab_manager;
 mod text;
 mod text_decorations;
 
 use crate::compositor::Compositor;
 use crate::filter_picker_entry;
 use crate::job::{self, Callback};
+pub use app::{AppId, Application};
 pub use editor::EditorView;
+pub use tab_manager::TabManager;
 use helix_stdx::rope;
 use helix_view::theme::Style;
 pub use markdown::Markdown;
@@ -30,11 +34,11 @@ pub use select::Select;
 pub use spinner::{ProgressSpinners, Spinner};
 pub use text::Text;
 
-use helix_view::Editor;
+use helix_view::{Document, Editor};
 use tui::text::{Span, Spans};
 
 use std::path::Path;
-use std::{error::Error, path::PathBuf};
+use std::path::PathBuf;
 
 struct Utf8PathBuf {
     path: String,
@@ -285,14 +289,28 @@ pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
         },
     ));
     let path_column = if config.icons { 1 } else { 0 };
-    let picker = Picker::new(columns, path_column, [], data, move |cx, path: &PathBuf, action| {
-        if let Err(e) = cx.editor.open(path, action) {
-            let err = if let Some(err) = e.source() {
-                format!("{}", err)
-            } else {
-                format!("unable to open \"{}\"", path.display())
-            };
-            cx.editor.set_error(err);
+    let picker = Picker::new(columns, path_column, [], data, move |cx, path: &PathBuf, _action| {
+        match Document::open(
+            path,
+            None,
+            true,
+            cx.editor.config.clone(),
+            cx.editor.syn_loader.clone(),
+        ) {
+            Ok(doc) => {
+                let callback = crate::job::Callback::EditorCompositor(Box::new(
+                    move |editor: &mut Editor, compositor: &mut Compositor| {
+                        if let Some(tab_mgr) = compositor.find::<TabManager>() {
+                            tab_mgr.new_editor_tab(doc, editor);
+                        }
+                    },
+                ));
+                cx.jobs.callback(async { Ok(callback) });
+            }
+            Err(e) => {
+                let err = format!("unable to open \"{}\": {}", path.display(), e);
+                cx.editor.set_error(err);
+            }
         }
     })
     .with_preview(|_editor, path| Some((path.as_path().into(), None)));
@@ -373,7 +391,7 @@ pub fn file_explorer(root: PathBuf, editor: &Editor) -> Result<FileExplorer, std
             root,
             directory_style,
         },
-        move |cx, (path, is_dir): &(PathBuf, bool), action| {
+        move |cx, (path, is_dir): &(PathBuf, bool), _action| {
             if *is_dir {
                 let new_root = helix_stdx::path::normalize(path);
                 let callback = Box::pin(async move {
@@ -386,13 +404,29 @@ pub fn file_explorer(root: PathBuf, editor: &Editor) -> Result<FileExplorer, std
                     Ok(call)
                 });
                 cx.jobs.callback(callback);
-            } else if let Err(e) = cx.editor.open(path, action) {
-                let err = if let Some(err) = e.source() {
-                    format!("{}", err)
-                } else {
-                    format!("unable to open \"{}\"", path.display())
-                };
-                cx.editor.set_error(err);
+            } else {
+                match Document::open(
+                    path,
+                    None,
+                    true,
+                    cx.editor.config.clone(),
+                    cx.editor.syn_loader.clone(),
+                ) {
+                    Ok(doc) => {
+                        let callback = crate::job::Callback::EditorCompositor(Box::new(
+                            move |editor: &mut Editor, compositor: &mut Compositor| {
+                                if let Some(tab_mgr) = compositor.find::<TabManager>() {
+                                    tab_mgr.new_editor_tab(doc, editor);
+                                }
+                            },
+                        ));
+                        cx.jobs.callback(async { Ok(callback) });
+                    }
+                    Err(e) => {
+                        let err = format!("unable to open \"{}\": {}", path.display(), e);
+                        cx.editor.set_error(err);
+                    }
+                }
             }
         },
     )
@@ -480,7 +514,7 @@ pub mod completers {
     }
 
     pub fn buffer(editor: &Editor, input: &str) -> Vec<Completion> {
-        let names = editor.documents.values().map(|doc| {
+        let names = std::iter::once(&editor.tabs[editor.active_tab].doc).map(|doc| {
             doc.relative_path()
                 .map(|p| p.display().to_string().into())
                 .unwrap_or_else(|| Cow::from(SCRATCH_BUFFER_NAME))

@@ -7,7 +7,7 @@ use helix_view::{
     document::DocumentLink,
     events::{DocumentDidChange, DocumentDidOpen, LanguageServerExited, LanguageServerInitialized},
     handlers::{lsp::DocumentLinksEvent, Handlers},
-    DocumentId, Editor,
+    AppId, Editor,
 };
 use tokio::time::Instant;
 
@@ -15,7 +15,7 @@ use crate::job;
 
 #[derive(Default)]
 pub(super) struct DocumentLinksHandler {
-    docs: HashSet<DocumentId>,
+    docs: HashSet<AppId>,
 }
 
 const DOCUMENT_CHANGE_DEBOUNCE: Duration = Duration::from_millis(250);
@@ -41,12 +41,13 @@ impl helix_event::AsyncHook for DocumentLinksHandler {
 }
 
 /// Request document links for a specific document and cache them for navigation.
-fn request_document_links(editor: &mut Editor, doc_id: DocumentId) {
-    let Some(doc) = editor.document_mut(doc_id) else {
+fn request_document_links(editor: &mut Editor, doc_id: AppId) {
+    if editor.tabs[editor.active_tab].doc.id() != doc_id {
         return;
-    };
+    }
 
-    let cancel = doc.document_link_controller.restart();
+    let cancel = editor.tabs[editor.active_tab].doc.document_link_controller.restart();
+    let doc = &editor.tabs[editor.active_tab].doc;
 
     let mut seen_language_servers = HashSet::new();
     let mut futures: FuturesOrdered<_> = doc
@@ -108,10 +109,11 @@ fn request_document_links(editor: &mut Editor, doc_id: DocumentId) {
     });
 }
 
-fn attach_document_links(editor: &mut Editor, doc_id: DocumentId, mut links: Vec<DocumentLink>) {
-    let Some(doc) = editor.documents.get_mut(&doc_id) else {
+fn attach_document_links(editor: &mut Editor, doc_id: AppId, mut links: Vec<DocumentLink>) {
+    if editor.tabs[editor.active_tab].doc.id() != doc_id {
         return;
-    };
+    }
+    let doc = &mut editor.tabs[editor.active_tab].doc;
 
     if links.is_empty() {
         doc.document_links.clear();
@@ -146,27 +148,19 @@ pub(super) fn register_hooks(handlers: &Handlers) {
     });
 
     register_hook!(move |event: &mut LanguageServerInitialized<'_>| {
-        let doc_ids: Vec<_> = event.editor.documents().map(|doc| doc.id()).collect();
-
-        for doc_id in doc_ids {
-            request_document_links(event.editor, doc_id);
-        }
+        let doc_id = event.editor.tabs[event.editor.active_tab].doc.id();
+        request_document_links(event.editor, doc_id);
 
         Ok(())
     });
 
     register_hook!(move |event: &mut LanguageServerExited<'_>| {
-        for doc in event.editor.documents_mut() {
-            if doc.supports_language_server(event.server_id) {
-                doc.document_links.clear();
-            }
+        if event.editor.tabs[event.editor.active_tab].doc.supports_language_server(event.server_id) {
+            event.editor.tabs[event.editor.active_tab].doc.document_links.clear();
         }
 
-        let doc_ids: Vec<_> = event.editor.documents().map(|doc| doc.id()).collect();
-
-        for doc_id in doc_ids {
-            request_document_links(event.editor, doc_id);
-        }
+        let doc_id = event.editor.tabs[event.editor.active_tab].doc.id();
+        request_document_links(event.editor, doc_id);
 
         Ok(())
     });

@@ -2,12 +2,12 @@ use helix_core::{ChangeSet, Rope};
 use helix_event::events;
 use helix_lsp::LanguageServerId;
 
-use crate::{editor::Config, Document, DocumentId, Editor, ViewId};
+use crate::{editor::Config, Document, AppId, Editor, ViewId};
 
 events! {
     DocumentDidOpen<'a> {
         editor: &'a mut Editor,
-        doc: DocumentId
+        doc: AppId
     }
     DocumentDidChange<'a> {
         doc: &'a mut Document,
@@ -21,9 +21,9 @@ events! {
         doc: Document
     }
     SelectionDidChange<'a> { doc: &'a mut Document, view: ViewId }
-    DiagnosticsDidChange<'a> { editor: &'a mut Editor, doc: DocumentId }
+    DiagnosticsDidChange<'a> { editor: &'a mut Editor, doc: AppId }
     // called **after** a document loses focus (but not when its closed)
-    DocumentFocusLost<'a> { editor: &'a mut Editor, doc: DocumentId }
+    DocumentFocusLost<'a> { editor: &'a mut Editor, doc: AppId }
 
     LanguageServerInitialized<'a> {
         editor: &'a mut Editor,

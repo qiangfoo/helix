@@ -130,15 +130,28 @@ fn jump_to_position(
     offset_encoding: OffsetEncoding,
     action: Action,
 ) {
-    let doc = match editor.open(path, action) {
-        Ok(id) => doc_mut!(editor, &id),
+    match Document::open(
+        path,
+        None,
+        true,
+        editor.config.clone(),
+        editor.syn_loader.clone(),
+    ) {
+        Ok(mut doc) => {
+            // Initialize the new document for the current view, then replace.
+            let view_id = editor.tabs[editor.active_tab].tree.focus;
+            let view_id = editor.tabs[editor.active_tab].tree.get(view_id).id;
+            doc.ensure_view_init(view_id);
+            editor.tabs[editor.active_tab].doc = doc;
+            editor.launch_language_servers(editor.tabs[editor.active_tab].doc.id());
+        }
         Err(err) => {
             let err = format!("failed to open path: {:?}: {:?}", path, err);
             editor.set_error(err);
             return;
         }
     };
-    let view = view_mut!(editor);
+    let (view, doc) = current!(editor);
     // TODO: convert inside server
     let new_range = if let Some(new_range) = lsp_range_to_range(doc.text(), range, offset_encoding)
     {
@@ -904,11 +917,9 @@ pub fn compute_inlay_hints_for_all_views(editor: &mut Editor, jobs: &mut crate::
         return;
     }
 
-    for (view, _) in editor.tree.views() {
-        let doc = match editor.documents.get(&view.doc) {
-            Some(doc) => doc,
-            None => continue,
-        };
+    let dv = &editor.tabs[editor.active_tab];
+    for (view, _) in dv.tree.views() {
+        let doc = &dv.doc;
         if let Some(callback) = compute_inlay_hints_for_view(view, doc) {
             jobs.callback(callback);
         }
@@ -970,15 +981,15 @@ fn compute_inlay_hints_for_view(
         language_server.text_document_range_inlay_hints(doc.identifier(), range, None)?,
         move |editor, _compositor, response: Option<Vec<lsp::InlayHint>>| {
             // The config was modified or the window was closed while the request was in flight
-            if !editor.config().lsp.display_inlay_hints || editor.tree.try_get(view_id).is_none() {
+            if !editor.config().lsp.display_inlay_hints || editor.tabs[editor.active_tab].tree.try_get(view_id).is_none() {
                 return;
             }
 
             // Add annotations to relevant document, not the current one (it may have changed in between)
-            let doc = match editor.documents.get_mut(&doc_id) {
-                Some(doc) => doc,
-                None => return,
-            };
+            if editor.tabs[editor.active_tab].doc.id() != doc_id {
+                return;
+            }
+            let doc = &mut editor.tabs[editor.active_tab].doc;
 
             // If we have neither hints nor an LSP, empty the inlay hints since they're now oudated
             let mut hints = match response {

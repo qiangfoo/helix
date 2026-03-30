@@ -5,7 +5,7 @@ use crate::{
     editor::{GutterConfig, GutterType},
     graphics::Rect,
     handlers::diagnostics::DiagnosticsHandler,
-    Align, Document, DocumentId, Theme, ViewId,
+    Align, Document, AppId, Theme, ViewId,
 };
 
 use helix_core::{
@@ -24,7 +24,7 @@ use std::{
 
 const JUMP_LIST_CAPACITY: usize = 30;
 
-type Jump = (DocumentId, Selection);
+type Jump = (AppId, Selection);
 
 #[derive(Debug, Clone)]
 pub struct JumpList {
@@ -95,7 +95,7 @@ impl JumpList {
         }
     }
 
-    pub fn remove(&mut self, doc_id: &DocumentId) {
+    pub fn remove(&mut self, doc_id: &AppId) {
         self.jumps.retain(|(other_id, _)| other_id != doc_id);
     }
 
@@ -131,15 +131,15 @@ pub struct ViewPosition {
 pub struct View {
     pub id: ViewId,
     pub area: Rect,
-    pub doc: DocumentId,
+    pub doc: AppId,
     pub jumps: JumpList,
     // documents accessed from this view from the oldest one to last viewed one
-    pub docs_access_history: Vec<DocumentId>,
+    pub docs_access_history: Vec<AppId>,
     /// the last modified files before the current one
     /// ordered from most frequent to least frequent
     // uses two docs because we want to be able to swap between the
     // two last modified docs which we need to manually keep track of
-    pub last_modified_docs: [Option<DocumentId>; 2],
+    pub last_modified_docs: [Option<AppId>; 2],
     /// used to store previous selections of tree-sitter objects
     pub object_selections: Vec<Selection>,
     /// all gutter-related configuration settings, used primarily for gutter rendering
@@ -148,7 +148,7 @@ pub struct View {
     /// Changes between documents and views are synced lazily when switching windows. This
     /// mapping keeps track of the last applied history revision so that only new changes
     /// are applied.
-    doc_revisions: HashMap<DocumentId, usize>,
+    doc_revisions: HashMap<AppId, usize>,
     // HACKS: there should really only be a global diagnostics handler (the
     // non-focused views should just not have different handling for the cursor
     // line). For that we would need accces to editor everywhere (we want to use
@@ -170,7 +170,7 @@ impl fmt::Debug for View {
 }
 
 impl View {
-    pub fn new(doc: DocumentId, gutters: GutterConfig) -> Self {
+    pub fn new(doc: AppId, gutters: GutterConfig) -> Self {
         Self {
             id: ViewId::default(),
             doc,
@@ -185,7 +185,7 @@ impl View {
         }
     }
 
-    pub fn add_to_history(&mut self, id: DocumentId) {
+    pub fn add_to_history(&mut self, id: AppId) {
         if let Some(pos) = self.docs_access_history.iter().position(|&doc| doc == id) {
             self.docs_access_history.remove(pos);
         }
@@ -631,7 +631,7 @@ impl View {
         ))
     }
 
-    pub fn remove_document(&mut self, doc_id: &DocumentId) {
+    pub fn remove_document(&mut self, doc_id: &AppId) {
         self.jumps.remove(doc_id);
         self.docs_access_history.retain(|doc| doc != doc_id);
     }
@@ -704,7 +704,7 @@ mod tests {
 
     #[test]
     fn test_text_pos_at_screen_coords() {
-        let mut view = View::new(DocumentId::default(), GutterConfig::default());
+        let mut view = View::new(AppId::default(), GutterConfig::default());
         view.area = Rect::new(40, 40, 40, 40);
         let rope = Rope::from_str("abc\n\tdef");
         let mut doc = Document::from(
@@ -875,7 +875,7 @@ mod tests {
     #[test]
     fn test_text_pos_at_screen_coords_without_line_numbers_gutter() {
         let mut view = View::new(
-            DocumentId::default(),
+            AppId::default(),
             GutterConfig {
                 layout: vec![GutterType::Diagnostics],
                 line_numbers: GutterLineNumbersConfig::default(),
@@ -906,7 +906,7 @@ mod tests {
     #[test]
     fn test_text_pos_at_screen_coords_without_any_gutters() {
         let mut view = View::new(
-            DocumentId::default(),
+            AppId::default(),
             GutterConfig {
                 layout: vec![],
                 line_numbers: GutterLineNumbersConfig::default(),
@@ -936,7 +936,7 @@ mod tests {
 
     #[test]
     fn test_text_pos_at_screen_coords_cjk() {
-        let mut view = View::new(DocumentId::default(), GutterConfig::default());
+        let mut view = View::new(AppId::default(), GutterConfig::default());
         view.area = Rect::new(40, 40, 40, 40);
         let rope = Rope::from_str("Hi! こんにちは皆さん");
         let mut doc = Document::from(
@@ -1021,7 +1021,7 @@ mod tests {
 
     #[test]
     fn test_text_pos_at_screen_coords_graphemes() {
-        let mut view = View::new(DocumentId::default(), GutterConfig::default());
+        let mut view = View::new(AppId::default(), GutterConfig::default());
         view.area = Rect::new(40, 40, 40, 40);
         let rope = Rope::from_str("Hèl̀l̀ò world!");
         let mut doc = Document::from(
