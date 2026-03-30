@@ -874,7 +874,8 @@ impl EditorView {
     }
 
     fn command_mode(&mut self, mode: Mode, cxt: &mut commands::Context, event: KeyEvent) {
-        match (event, cxt.editor.count) {
+        let tab = &mut cxt.editor.tabs[cxt.editor.active_tab];
+        match (event, tab.count) {
             // If the count is already started and the input is a number, always continue the count.
             (key!(i @ '0'..='9'), Some(count)) => {
                 let i = i.to_digit(10).unwrap() as usize;
@@ -882,16 +883,16 @@ impl EditorView {
                 if count > 100_000_000 {
                     return;
                 }
-                cxt.editor.count = NonZeroUsize::new(count);
+                cxt.editor.tabs[cxt.editor.active_tab].count = NonZeroUsize::new(count);
             }
             // A non-zero digit will start the count if that number isn't used by a keymap.
             (key!(i @ '1'..='9'), None) if !self.keymaps.contains_key(mode, event) => {
                 let i = i.to_digit(10).unwrap() as usize;
-                cxt.editor.count = NonZeroUsize::new(i);
+                cxt.editor.tabs[cxt.editor.active_tab].count = NonZeroUsize::new(i);
             }
             _ => {
                 // set the count
-                cxt.count = cxt.editor.count;
+                cxt.count = cxt.editor.tabs[cxt.editor.active_tab].count;
                 // TODO: edge case: 0j -> reset to 1
                 // if this fails, count was Some(0)
                 // debug_assert!(cxt.count != 0);
@@ -901,7 +902,7 @@ impl EditorView {
                     self.on_next_key(OnKeyCallbackKind::Fallback, cxt, event);
                 }
                 if self.keymaps.pending().is_empty() {
-                    cxt.editor.count = None
+                    cxt.editor.tabs[cxt.editor.active_tab].count = None
                 }
             }
         }

@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 use helix_core::{Range, Selection};
 
 use crate::document::{Document, Mode};
@@ -13,6 +15,7 @@ pub struct DocView {
     pub doc: Document,
     pub tree: Tree,
     pub mode: Mode,
+    pub count: Option<NonZeroUsize>,
     pub last_selection: Option<Selection>,
     pub mouse_down_range: Option<Range>,
     pub cursor_cache: CursorCache,
@@ -29,6 +32,7 @@ impl DocView {
             doc,
             tree,
             mode: Mode::Normal,
+            count: None,
             last_selection: None,
             mouse_down_range: None,
             cursor_cache: CursorCache::default(),

@@ -262,7 +262,7 @@ impl TabManager {
         // Render pending keys from active tab
         if area.width.saturating_sub(status_msg_width as u16) > key_width {
             let mut disp = String::new();
-            if let Some(count) = editor.count {
+            if let Some(count) = editor.tabs[editor.active_tab].count {
                 disp.push_str(&count.to_string());
             }
             if let Some(tab) = self.active_tab() {

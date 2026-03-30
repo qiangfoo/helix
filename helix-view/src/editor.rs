@@ -1042,7 +1042,6 @@ pub struct Editor {
     /// Index of the currently active tab.
     pub active_tab: usize,
 
-    pub count: Option<std::num::NonZeroUsize>,
     pub registers: Registers,
     pub language_servers: helix_lsp::Registry,
     pub diagnostics: Diagnostics,
@@ -1138,7 +1137,6 @@ impl Editor {
         Self {
             tabs: Vec::new(),
             active_tab: 0,
-            count: None,
             theme: theme_loader.default(),
             language_servers,
             diagnostics: Diagnostics::new(),
