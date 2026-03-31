@@ -23,7 +23,6 @@ use helix_view::{
 };
 
 use crate::{
-    compositor::Compositor,
     job::Callback,
     ui::{self, overlay::overlaid, FileLocation, Picker, Popup},
 };
@@ -139,11 +138,11 @@ fn jump_to_position(
     ) {
         Ok(mut doc) => {
             // Initialize the new document for the current view, then replace.
-            let view_id = editor.tabs[editor.active_tab].tree.focus;
-            let view_id = editor.tabs[editor.active_tab].tree.get(view_id).id;
+            let view_id = editor.tabs[editor.active_tab].tree().focus;
+            let view_id = editor.tabs[editor.active_tab].tree().get(view_id).id;
             doc.ensure_view_init(view_id);
-            editor.tabs[editor.active_tab].doc = doc;
-            editor.launch_language_servers(editor.tabs[editor.active_tab].doc.id());
+            *editor.tabs[editor.active_tab].doc_mut() = doc;
+            editor.launch_language_servers(editor.tabs[editor.active_tab].doc().id());
         }
         Err(err) => {
             let err = format!("failed to open path: {:?}: {:?}", path, err);
@@ -430,7 +429,8 @@ pub fn symbol_picker(cx: &mut Context) {
                 Err(err) => log::error!("Error requesting document symbols: {err}"),
             }
         }
-        let call = move |_editor: &mut Editor, compositor: &mut Compositor| {
+        let call = move |editor: &mut Editor| {
+            use crate::layers::EditorLayers;
             let columns = [
                 ui::PickerColumn::new("kind", |item: &SymbolInformationItem, _| {
                     display_symbol_kind(item.symbol.kind).into()
@@ -462,10 +462,10 @@ pub fn symbol_picker(cx: &mut Context) {
             .with_preview(move |_editor, item| location_to_file_location(&item.location))
             .truncate_start(false);
 
-            compositor.push(Box::new(overlaid(picker)))
+            editor.push_layer(Box::new(overlaid(picker)))
         };
 
-        Ok(Callback::EditorCompositor(Box::new(call)))
+        Ok(Callback::Editor(Box::new(call)))
     });
 }
 
@@ -636,7 +636,8 @@ impl Display for ApplyEditErrorKind {
 }
 
 /// Precondition: `locations` should be non-empty.
-fn goto_impl(editor: &mut Editor, compositor: &mut Compositor, locations: Vec<Location>) {
+fn goto_impl(editor: &mut Editor, locations: Vec<Location>) {
+    use crate::layers::EditorLayers;
     let cwdir = helix_stdx::env::current_working_dir();
 
     match locations.as_slice() {
@@ -662,7 +663,7 @@ fn goto_impl(editor: &mut Editor, compositor: &mut Compositor, locations: Vec<Lo
                 jump_to_location(cx.editor, location, action)
             })
             .with_preview(|_editor, location| location_to_file_location(location));
-            compositor.push(Box::new(overlaid(picker)));
+            editor.push_layer(Box::new(overlaid(picker)));
         }
     }
 }
@@ -716,7 +717,7 @@ where
                 Err(err) => log::error!("Error requesting locations: {err}"),
             }
         }
-        let call = move |editor: &mut Editor, compositor: &mut Compositor| {
+        let call = move |editor: &mut Editor| {
             if locations.is_empty() {
                 editor.set_error(match feature {
                     LanguageServerFeature::GotoDeclaration => "No declaration found.",
@@ -726,10 +727,10 @@ where
                     _ => "No location found.",
                 });
             } else {
-                goto_impl(editor, compositor, locations);
+                goto_impl(editor, locations);
             }
         };
-        Ok(Callback::EditorCompositor(Box::new(call)))
+        Ok(Callback::Editor(Box::new(call)))
     });
 }
 
@@ -799,14 +800,14 @@ pub fn goto_reference(cx: &mut Context) {
                 Err(err) => log::error!("Error requesting references: {err}"),
             }
         }
-        let call = move |editor: &mut Editor, compositor: &mut Compositor| {
+        let call = move |editor: &mut Editor| {
             if locations.is_empty() {
                 editor.set_error("No references found.");
             } else {
-                goto_impl(editor, compositor, locations);
+                goto_impl(editor, locations);
             }
         };
-        Ok(Callback::EditorCompositor(Box::new(call)))
+        Ok(Callback::Editor(Box::new(call)))
     });
 }
 
@@ -857,7 +858,8 @@ pub fn hover(cx: &mut Context) {
             }
         }
 
-        let call = move |editor: &mut Editor, compositor: &mut Compositor| {
+        let call = move |editor: &mut Editor| {
+            use crate::layers::EditorLayers;
             if hovers.is_empty() {
                 editor.set_status("No hover results available.");
                 return;
@@ -866,9 +868,9 @@ pub fn hover(cx: &mut Context) {
             // create new popup
             let contents = Hover::new(hovers, editor.syn_loader.clone());
             let popup = Popup::new(Hover::ID, contents).auto_close(true);
-            compositor.replace_or_push(Hover::ID, popup);
+            editor.replace_or_push_layer(Hover::ID, popup);
         };
-        Ok(Callback::EditorCompositor(Box::new(call)))
+        Ok(Callback::Editor(Box::new(call)))
     });
 }
 
@@ -884,7 +886,7 @@ pub fn select_references_to_symbol_under_cursor(cx: &mut Context) {
 
     cx.callback(
         future,
-        move |editor, _compositor, response: Option<Vec<lsp::DocumentHighlight>>| {
+        move |editor, response: Option<Vec<lsp::DocumentHighlight>>| {
             let document_highlights = match response {
                 Some(highlights) if !highlights.is_empty() => highlights,
                 _ => return,
@@ -918,8 +920,8 @@ pub fn compute_inlay_hints_for_all_views(editor: &mut Editor, jobs: &mut crate::
     }
 
     let dv = &editor.tabs[editor.active_tab];
-    for (view, _) in dv.tree.views() {
-        let doc = &dv.doc;
+    for (view, _) in dv.tree().views() {
+        let doc = dv.doc();
         if let Some(callback) = compute_inlay_hints_for_view(view, doc) {
             jobs.callback(callback);
         }
@@ -979,17 +981,17 @@ fn compute_inlay_hints_for_view(
 
     let callback = super::make_job_callback(
         language_server.text_document_range_inlay_hints(doc.identifier(), range, None)?,
-        move |editor, _compositor, response: Option<Vec<lsp::InlayHint>>| {
+        move |editor, response: Option<Vec<lsp::InlayHint>>| {
             // The config was modified or the window was closed while the request was in flight
-            if !editor.config().lsp.display_inlay_hints || editor.tabs[editor.active_tab].tree.try_get(view_id).is_none() {
+            if !editor.config().lsp.display_inlay_hints || editor.tabs[editor.active_tab].tree().try_get(view_id).is_none() {
                 return;
             }
 
             // Add annotations to relevant document, not the current one (it may have changed in between)
-            if editor.tabs[editor.active_tab].doc.id() != doc_id {
+            if editor.tabs[editor.active_tab].doc().id() != doc_id {
                 return;
             }
-            let doc = &mut editor.tabs[editor.active_tab].doc;
+            let doc = editor.tabs[editor.active_tab].doc_mut();
 
             // If we have neither hints nor an LSP, empty the inlay hints since they're now oudated
             let mut hints = match response {

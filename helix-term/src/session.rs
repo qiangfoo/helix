@@ -33,7 +33,7 @@ pub fn save_session(editor: &Editor) {
 
     let files: Vec<PathBuf> = editor.tabs
         .iter()
-        .filter_map(|dv| dv.doc.path().cloned())
+        .filter_map(|dv| dv.doc().path().cloned())
         .collect();
 
     if files.is_empty() {

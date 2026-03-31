@@ -1,13 +1,13 @@
 use crate::{
     annotations::diagnostics::{DiagnosticFilter, InlineDiagnosticsConfig},
     clipboard::ClipboardProvider,
-    doc_view::DocView,
     document::Mode,
     events::DocumentFocusLost,
     graphics::{CursorKind, Rect},
     handlers::Handlers,
     info::Info,
     register::Registers,
+    tab::Tab,
     theme::{self, Theme},
     tree,
     Document, AppId, View, ViewId,
@@ -1038,7 +1038,7 @@ type Diagnostics = BTreeMap<Uri, Vec<(lsp::Diagnostic, DiagnosticProvider)>>;
 
 pub struct Editor {
     /// Per-tab state: each tab owns a document, view tree, mode, etc.
-    pub tabs: Vec<DocView>,
+    pub tabs: Vec<Box<dyn Tab>>,
     /// Index of the currently active tab.
     pub active_tab: usize,
 
@@ -1074,6 +1074,10 @@ pub struct Editor {
     pub config_events: (UnboundedSender<ConfigEvent>, UnboundedReceiver<ConfigEvent>),
     pub needs_redraw: bool,
     pub handlers: Handlers,
+
+    /// Opaque layer state, managed by the UI layer (helix-term).
+    /// Stores the compositor layer stack, downcasted by helix-term.
+    pub layer_state: Box<dyn std::any::Any>,
 }
 
 pub type Motion = Box<dyn Fn(&mut Editor)>;
@@ -1163,6 +1167,7 @@ impl Editor {
             needs_redraw: false,
             handlers,
             dir_stack: VecDeque::with_capacity(DIR_STACK_CAP),
+            layer_state: Box::new(()),
         }
     }
 
@@ -1194,14 +1199,14 @@ impl Editor {
         if self.tabs.is_empty() {
             return Mode::Normal;
         }
-        self.tabs[self.active_tab].mode
+        self.tabs[self.active_tab].mode()
     }
 
-    pub fn add_tab(&mut self, dv: DocView) -> usize {
-        self.tabs.push(dv);
+    pub fn add_tab(&mut self, tab: Box<dyn Tab>) -> usize {
+        self.tabs.push(tab);
         let index = self.tabs.len() - 1;
         self.active_tab = index;
-        let doc_id = self.tabs[index].doc.id();
+        let doc_id = self.tabs[index].doc().id();
         self.launch_language_servers(doc_id);
         index
     }
@@ -1413,9 +1418,9 @@ impl Editor {
         }
 
         // Check if the current doc matches the old path
-        let matches = self.tabs[self.active_tab].doc.path().map(|p| p == old_path).unwrap_or(false);
+        let matches = self.tabs[self.active_tab].doc().path().map(|p| p == old_path).unwrap_or(false);
         if matches {
-            let doc_id = self.tabs[self.active_tab].doc.id();
+            let doc_id = self.tabs[self.active_tab].doc().id();
             self.set_doc_path(doc_id, &new_path);
         }
         let is_dir = new_path.is_dir();
@@ -1437,7 +1442,7 @@ impl Editor {
     }
 
     pub fn set_doc_path(&mut self, doc_id: AppId, path: &Path) {
-        let doc = &mut self.tabs[self.active_tab].doc;
+        let doc = self.tabs[self.active_tab].doc_mut();
         let old_path = doc.path();
 
         if let Some(old_path) = old_path {
@@ -1463,12 +1468,12 @@ impl Editor {
 
     pub fn refresh_doc_language(&mut self, doc_id: AppId) {
         let loader = self.syn_loader.load();
-        let doc = &mut self.tabs[self.active_tab].doc;
+        let doc = self.tabs[self.active_tab].doc_mut();
         doc.detect_language(&loader);
         doc.detect_editor_config();
         doc.detect_indent_and_line_ending();
         self.refresh_language_servers(doc_id);
-        let doc = &mut self.tabs[self.active_tab].doc;
+        let doc = self.tabs[self.active_tab].doc_mut();
         let diagnostics = Editor::doc_diagnostics(&self.language_servers, &self.diagnostics, doc);
         doc.replace_diagnostics(diagnostics, &[], None);
         doc.reset_all_inlay_hints();
@@ -1480,7 +1485,7 @@ impl Editor {
             return;
         }
         // if doc doesn't have a URL it's a scratch buffer, ignore it
-        let doc = &mut self.tabs[self.active_tab].doc;
+        let doc = self.tabs[self.active_tab].doc_mut();
         let Some(doc_url) = doc.url() else {
             return;
         };
@@ -1557,9 +1562,9 @@ impl Editor {
         if self.tabs.is_empty() {
             return;
         }
-        self.tabs[self.active_tab].tree.remove(view_id);
+        self.tabs[self.active_tab].tree_mut().remove(view_id);
         // If tree has no views left, remove the tab
-        if self.tabs[self.active_tab].tree.views().count() == 0 {
+        if self.tabs[self.active_tab].tree().views().count() == 0 {
             self.close_tab(self.active_tab);
         } else {
             self._refresh();
@@ -1571,14 +1576,14 @@ impl Editor {
             return;
         }
         let config = self.config();
-        let dv = &mut self.tabs[self.active_tab];
+        let tab = &mut self.tabs[self.active_tab];
 
         if !config.lsp.display_inlay_hints {
-            dv.doc.reset_all_inlay_hints();
+            tab.doc_mut().reset_all_inlay_hints();
         }
 
-        for (view, _) in dv.tree.views_mut() {
-            let doc = &mut dv.doc;
+        let (doc, tree) = tab.doc_and_tree_mut();
+        for (view, _) in tree.views_mut() {
             view.sync_changes(doc);
             view.gutters = config.gutters.clone();
             view.ensure_cursor_in_view(doc, config.scrolloff)
@@ -1589,7 +1594,7 @@ impl Editor {
         if self.tabs.is_empty() {
             return;
         }
-        if self.tabs[self.active_tab].tree.resize(area) {
+        if self.tabs[self.active_tab].tree_mut().resize(area) {
             self._refresh();
         };
     }
@@ -1598,34 +1603,33 @@ impl Editor {
         if self.tabs.is_empty() {
             return;
         }
-        let dv = &mut self.tabs[self.active_tab];
-        if dv.tree.focus == view_id {
+        if self.tabs[self.active_tab].tree().focus == view_id {
             return;
         }
 
         // Reset mode to normal and ensure any pending changes are committed in the old document.
         self.enter_normal_mode();
         {
-            let dv = &mut self.tabs[self.active_tab];
-            let view = dv.tree.get_mut(dv.tree.focus);
-            let doc = &mut dv.doc;
+            let tab = &mut self.tabs[self.active_tab];
+            let focus = tab.tree().focus;
+            let (doc, tree) = tab.doc_and_tree_mut();
+            let view = tree.get_mut(focus);
             doc.append_changes_to_history(view);
         }
         self.ensure_cursor_in_view(view_id);
         // Update jumplist selections with new document changes.
         {
-            let dv = &mut self.tabs[self.active_tab];
-            for (view, _focused) in dv.tree.views_mut() {
-                let doc = &mut dv.doc;
+            let (doc, tree) = self.tabs[self.active_tab].doc_and_tree_mut();
+            for (view, _focused) in tree.views_mut() {
                 view.sync_changes(doc);
             }
         }
 
-        let dv = &mut self.tabs[self.active_tab];
-        let prev_id = std::mem::replace(&mut dv.tree.focus, view_id);
-        dv.doc.mark_as_focused();
+        let tab = &mut self.tabs[self.active_tab];
+        let prev_id = std::mem::replace(&mut tab.tree_mut().focus, view_id);
+        tab.doc_mut().mark_as_focused();
 
-        let focus_lost = dv.tree.get(prev_id).doc;
+        let focus_lost = self.tabs[self.active_tab].tree().get(prev_id).doc;
         dispatch(DocumentFocusLost {
             editor: self,
             doc: focus_lost,
@@ -1633,28 +1637,28 @@ impl Editor {
     }
 
     pub fn focus_next(&mut self) {
-        let next = self.tabs[self.active_tab].tree.next();
+        let next = self.tabs[self.active_tab].tree().next();
         self.focus(next);
     }
 
     pub fn focus_prev(&mut self) {
-        let prev = self.tabs[self.active_tab].tree.prev();
+        let prev = self.tabs[self.active_tab].tree().prev();
         self.focus(prev);
     }
 
     pub fn focus_direction(&mut self, direction: tree::Direction) {
-        let current_view = self.tabs[self.active_tab].tree.focus;
-        if let Some(id) = self.tabs[self.active_tab].tree.find_split_in_direction(current_view, direction) {
+        let current_view = self.tabs[self.active_tab].tree().focus;
+        if let Some(id) = self.tabs[self.active_tab].tree().find_split_in_direction(current_view, direction) {
             self.focus(id)
         }
     }
 
     pub fn swap_split_in_direction(&mut self, direction: tree::Direction) {
-        self.tabs[self.active_tab].tree.swap_split_in_direction(direction);
+        self.tabs[self.active_tab].tree_mut().swap_split_in_direction(direction);
     }
 
     pub fn transpose_view(&mut self) {
-        self.tabs[self.active_tab].tree.transpose();
+        self.tabs[self.active_tab].tree_mut().transpose();
     }
 
     pub fn should_close(&self) -> bool {
@@ -1666,9 +1670,9 @@ impl Editor {
             return;
         }
         let config = self.config();
-        let dv = &mut self.tabs[self.active_tab];
-        let view = dv.tree.get(id);
-        view.ensure_cursor_in_view(&mut dv.doc, config.scrolloff)
+        let (doc, tree) = self.tabs[self.active_tab].doc_and_tree_mut();
+        let view = tree.get(id);
+        view.ensure_cursor_in_view(doc, config.scrolloff)
     }
 
     /// Returns all supported diagnostics for the document
@@ -1731,13 +1735,13 @@ impl Editor {
             return (None, CursorKind::default());
         }
         let config = self.config();
-        let dv = &self.tabs[self.active_tab];
+        let tab = &self.tabs[self.active_tab];
         let (view, doc) = current_ref!(self);
-        if let Some(mut pos) = dv.cursor_cache.get(view, doc) {
+        if let Some(mut pos) = tab.cursor_cache().get(view, doc) {
             let inner = view.inner_area(doc);
             pos.col += inner.x as usize;
             pos.row += inner.y as usize;
-            let cursorkind = config.cursor_shape.from_mode(dv.mode);
+            let cursorkind = config.cursor_shape.from_mode(tab.mode());
             (Some(pos), cursorkind)
         } else {
             (None, CursorKind::default())
@@ -1808,11 +1812,11 @@ impl Editor {
     pub fn enter_normal_mode(&mut self) {
         use helix_core::graphemes;
 
-        if self.tabs[self.active_tab].mode == Mode::Normal {
+        if self.tabs[self.active_tab].mode() == Mode::Normal {
             return;
         }
 
-        self.tabs[self.active_tab].mode = Mode::Normal;
+        self.tabs[self.active_tab].set_mode(Mode::Normal);
         let (view, doc) = current!(self);
 
         try_restore_indent(doc, view);
@@ -1839,9 +1843,10 @@ impl Editor {
     /// If possible or there are no selections returns current_view,
     /// otherwise uses an arbitrary view.
     pub fn get_synced_view_id(&mut self, _id: AppId) -> ViewId {
-        let dv = &mut self.tabs[self.active_tab];
-        let current_view = dv.tree.get_mut(dv.tree.focus);
-        let doc = &mut dv.doc;
+        let tab = &mut self.tabs[self.active_tab];
+        let focus = tab.tree().focus;
+        let (doc, tree) = tab.doc_and_tree_mut();
+        let current_view = tree.get_mut(focus);
         if doc.selections().contains_key(&current_view.id) {
             // only need to sync current view if this is not the current doc
             if current_view.doc != _id {
@@ -1850,7 +1855,7 @@ impl Editor {
             current_view.id
         } else if let Some(view_id) = doc.selections().keys().next() {
             let view_id = *view_id;
-            let view = dv.tree.get_mut(view_id);
+            let view = tree.get_mut(view_id);
             view.sync_changes(doc);
             view_id
         } else {
@@ -1870,15 +1875,14 @@ impl Editor {
     }
 
     pub fn jump_forward(&mut self, view_id: ViewId, count: usize) {
-        if let Some((doc_id, selection)) = self.tabs[self.active_tab].tree.get_mut(view_id).jumps.forward(count).cloned() {
+        if let Some((doc_id, selection)) = self.tabs[self.active_tab].tree_mut().get_mut(view_id).jumps.forward(count).cloned() {
             self.jump_to(view_id, doc_id, selection);
         }
     }
 
     pub fn jump_backward(&mut self, view_id: ViewId, count: usize) {
-        let dv = &mut self.tabs[self.active_tab];
-        let view = dv.tree.get_mut(view_id);
-        let doc = &mut dv.doc;
+        let (doc, tree) = self.tabs[self.active_tab].doc_and_tree_mut();
+        let view = tree.get_mut(view_id);
         if let Some((doc_id, selection)) = view
             .jumps
             .backward(view_id, doc, count)
@@ -1889,16 +1893,18 @@ impl Editor {
     }
 
     fn jump_to(&mut self, view_id: ViewId, _dest_doc_id: AppId, mut selection: Selection) {
-        let dv = &mut self.tabs[self.active_tab];
-        let view = dv.tree.get_mut(view_id);
-        let doc = &mut dv.doc;
-        if let Some(transaction) = view.changes_to_sync(doc) {
-            let text = doc.text().slice(..);
-            selection = selection.map(transaction.changes()).ensure_invariants(text);
+        {
+            let (doc, tree) = self.tabs[self.active_tab].doc_and_tree_mut();
+            let view = tree.get_mut(view_id);
+            if let Some(transaction) = view.changes_to_sync(doc) {
+                let text = doc.text().slice(..);
+                selection = selection.map(transaction.changes()).ensure_invariants(text);
+            }
         }
-        let dv = &mut self.tabs[self.active_tab];
-        let view = dv.tree.get_mut(dv.tree.focus);
-        let doc = &mut dv.doc;
+        let tab = &mut self.tabs[self.active_tab];
+        let focus = tab.tree().focus;
+        let (doc, tree) = tab.doc_and_tree_mut();
+        let view = tree.get_mut(focus);
         doc.set_selection(view_id, selection);
         view.ensure_cursor_in_view_center(doc, self.config.load().scrolloff);
     }

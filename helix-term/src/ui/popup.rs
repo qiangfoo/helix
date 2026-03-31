@@ -227,9 +227,11 @@ impl<T: Component> Popup<T> {
         }: &MouseEvent,
     ) -> EventResult {
         if self.auto_close && matches!(kind, MouseEventKind::Down(_)) {
-            let close_fn: Callback = Box::new(|compositor, _| {
+            let id = self.id;
+            let close_fn: Callback = Box::new(move |editor: &mut Editor| {
+                use crate::layers::EditorLayers;
                 // remove the layer
-                compositor.remove(self.id.as_ref());
+                editor.remove_layer(id);
             });
 
             return EventResult::Ignored(Some(close_fn));
@@ -274,9 +276,11 @@ impl<T: Component> Component for Popup<T> {
             return EventResult::Ignored(None);
         }
 
-        let close_fn: Callback = Box::new(|compositor, _| {
+        let id = self.id;
+        let close_fn: Callback = Box::new(move |editor: &mut Editor| {
+            use crate::layers::EditorLayers;
             // remove the layer
-            compositor.remove(self.id.as_ref());
+            editor.remove_layer(id);
         });
 
         // Code completion handles arrows and page up/down itself,

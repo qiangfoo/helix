@@ -163,7 +163,7 @@ pub fn line_numbers<'doc>(
         .char_to_line(doc.selection(view.id).primary().cursor(text));
 
     let line_number = editor.config().line_number;
-    let _mode = editor.tabs[editor.active_tab].mode;
+    let _mode = editor.tabs[editor.active_tab].mode();
 
     Box::new(
         move |line: usize, selected: bool, first_visual_line: bool, out: &mut String| {

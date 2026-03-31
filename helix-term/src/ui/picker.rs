@@ -3,7 +3,7 @@ mod query;
 
 use crate::{
     alt,
-    compositor::{self, Component, Compositor, Context, Event, EventResult},
+    compositor::{self, Component, Context, Event, EventResult},
     ctrl, key, shift,
     ui::{
         self,
@@ -610,8 +610,8 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
         match path_or_id {
             PathOrId::Path(path) => {
                 if let Some(dv) = editor.tabs.get(editor.active_tab) {
-                    if dv.doc.path().map_or(false, |p| p == path) {
-                        return Some((Preview::EditorDocument(&dv.doc), range));
+                    if dv.doc().path().map_or(false, |p| p == path) {
+                        return Some((Preview::EditorDocument(dv.doc()), range));
                     }
                 }
 
@@ -695,8 +695,8 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
                 Some((Preview::Cached(&self.preview_cache[&path]), range))
             }
             PathOrId::Id(id) => {
-                if editor.tabs[editor.active_tab].doc.id() == id {
-                    Some((Preview::EditorDocument(&editor.tabs[editor.active_tab].doc), range))
+                if editor.tabs[editor.active_tab].doc().id() == id {
+                    Some((Preview::EditorDocument(editor.tabs[editor.active_tab].doc()), range))
                 } else {
                     None
                 }
@@ -1119,9 +1119,10 @@ impl<I: 'static + Send + Sync, D: 'static + Send + Sync> Component for Picker<I,
             // excessive memory consumption
             let callback: compositor::Callback =
                 if picker.matcher.snapshot().item_count() > 1_000_000 {
-                    Box::new(|compositor: &mut Compositor, _ctx| {
+                    Box::new(|editor: &mut Editor| {
+                        use crate::layers::EditorLayers;
                         // remove the layer
-                        compositor.pop();
+                        editor.pop_layer();
                     })
                 } else {
                     // stop streaming in new items in the background, really we should
@@ -1129,9 +1130,13 @@ impl<I: 'static + Send + Sync, D: 'static + Send + Sync> Component for Picker<I,
                     // reopened instead (like for an FS crawl) that would also remove the
                     // need for the special case above but that is pretty tricky
                     picker.version.fetch_add(1, atomic::Ordering::Relaxed);
-                    Box::new(|compositor: &mut Compositor, _ctx| {
+                    Box::new(|editor: &mut Editor| {
                         // remove the layer
-                        compositor.last_picker = compositor.pop();
+                        let ls = editor
+                            .layer_state
+                            .downcast_mut::<crate::layers::LayerState>()
+                            .expect("Editor.layer_state must be LayerState");
+                        ls.last_picker = ls.layers.pop();
                     })
                 };
             EventResult::Consumed(Some(callback))

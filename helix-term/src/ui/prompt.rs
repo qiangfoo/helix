@@ -1,10 +1,11 @@
-use crate::compositor::{Component, Compositor, Context, Event, EventResult};
+use crate::compositor::{Component, Context, Event, EventResult};
 use crate::{alt, ctrl, key, shift, ui};
 use arc_swap::ArcSwap;
 use helix_core::syntax;
 use helix_view::document::Mode;
 use helix_view::input::KeyEvent;
 use helix_view::keyboard::KeyCode;
+use helix_view::Editor;
 use std::sync::Arc;
 use std::{borrow::Cow, ops::RangeFrom};
 use tui::buffer::Buffer as Surface;
@@ -16,10 +17,7 @@ use helix_core::{
     unicode::width::UnicodeWidthStr,
     Position,
 };
-use helix_view::{
-    graphics::{CursorKind, Margin, Rect},
-    Editor,
-};
+use helix_view::graphics::{CursorKind, Margin, Rect};
 
 type PromptCharHandler = Box<dyn Fn(&mut Prompt, char, &Context)>;
 
@@ -611,9 +609,10 @@ impl Component for Prompt {
             _ => return EventResult::Ignored(None),
         };
 
-        let close_fn = EventResult::Consumed(Some(Box::new(|compositor: &mut Compositor, _| {
+        let close_fn = EventResult::Consumed(Some(Box::new(|editor: &mut Editor| {
+            use crate::layers::EditorLayers;
             // remove the layer
-            compositor.pop();
+            editor.pop_layer();
         })));
 
         match event {

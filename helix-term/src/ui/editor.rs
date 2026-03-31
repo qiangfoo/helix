@@ -158,7 +158,7 @@ impl EditorView {
             .cursor(doc.text().slice(..));
         if is_focused {
             decorations.add_decoration(text_decorations::Cursor {
-                cache: &editor.tabs[editor.active_tab].cursor_cache,
+                cache: editor.tabs[editor.active_tab].cursor_cache(),
                 primary_cursor,
             });
         }
@@ -874,8 +874,8 @@ impl EditorView {
     }
 
     fn command_mode(&mut self, mode: Mode, cxt: &mut commands::Context, event: KeyEvent) {
-        let tab = &mut cxt.editor.tabs[cxt.editor.active_tab];
-        match (event, tab.count) {
+        let tab_count = cxt.editor.tabs[cxt.editor.active_tab].count();
+        match (event, tab_count) {
             // If the count is already started and the input is a number, always continue the count.
             (key!(i @ '0'..='9'), Some(count)) => {
                 let i = i.to_digit(10).unwrap() as usize;
@@ -883,16 +883,16 @@ impl EditorView {
                 if count > 100_000_000 {
                     return;
                 }
-                cxt.editor.tabs[cxt.editor.active_tab].count = NonZeroUsize::new(count);
+                cxt.editor.tabs[cxt.editor.active_tab].set_count(NonZeroUsize::new(count));
             }
             // A non-zero digit will start the count if that number isn't used by a keymap.
             (key!(i @ '1'..='9'), None) if !self.keymaps.contains_key(mode, event) => {
                 let i = i.to_digit(10).unwrap() as usize;
-                cxt.editor.tabs[cxt.editor.active_tab].count = NonZeroUsize::new(i);
+                cxt.editor.tabs[cxt.editor.active_tab].set_count(NonZeroUsize::new(i));
             }
             _ => {
                 // set the count
-                cxt.count = cxt.editor.tabs[cxt.editor.active_tab].count;
+                cxt.count = cxt.editor.tabs[cxt.editor.active_tab].count();
                 // TODO: edge case: 0j -> reset to 1
                 // if this fails, count was Some(0)
                 // debug_assert!(cxt.count != 0);
@@ -902,7 +902,7 @@ impl EditorView {
                     self.on_next_key(OnKeyCallbackKind::Fallback, cxt, event);
                 }
                 if self.keymaps.pending().is_empty() {
-                    cxt.editor.tabs[cxt.editor.active_tab].count = None
+                    cxt.editor.tabs[cxt.editor.active_tab].set_count(None)
                 }
             }
         }
@@ -956,9 +956,9 @@ impl EditorView {
 
         let pos_and_view = |editor: &Editor, row, column, ignore_virtual_text| {
             let dv = &editor.tabs[editor.active_tab];
-            dv.tree.views().find_map(|(view, _focus)| {
+            dv.tree().views().find_map(|(view, _focus)| {
                 view.pos_at_screen_coords(
-                    &dv.doc,
+                    dv.doc(),
                     row,
                     column,
                     ignore_virtual_text,
@@ -969,7 +969,7 @@ impl EditorView {
 
         let gutter_coords_and_view = |editor: &Editor, row, column| {
             let dv = &editor.tabs[editor.active_tab];
-            dv.tree.views().find_map(|(view, _focus)| {
+            dv.tree().views().find_map(|(view, _focus)| {
                 view.gutter_coords_at_screen_coords(row, column)
                     .map(|coords| (coords, view.id))
             })
@@ -983,23 +983,23 @@ impl EditorView {
                     editor.focus(view_id);
 
                     let is_select = editor.mode() == Mode::Select;
-                    let dv = &mut editor.tabs[editor.active_tab];
-                    let doc = &mut dv.doc;
 
                     if modifiers == KeyModifiers::ALT {
+                        let doc = editor.tabs[editor.active_tab].doc_mut();
                         let selection = doc.selection(view_id).clone();
                         doc.set_selection(view_id, selection.push(Range::point(pos)));
                     } else if is_select {
                         // Discards non-primary selections for consistent UX with normal mode
+                        let doc = editor.tabs[editor.active_tab].doc_mut();
                         let primary = doc.selection(view_id).primary().put_cursor(
                             doc.text().slice(..),
                             pos,
                             true,
                         );
-                        dv.mouse_down_range = Some(primary);
                         doc.set_selection(view_id, Selection::single(primary.anchor, primary.head));
+                        editor.tabs[editor.active_tab].set_mouse_down_range(Some(primary));
                     } else {
-                        doc.set_selection(view_id, Selection::point(pos));
+                        editor.tabs[editor.active_tab].doc_mut().set_selection(view_id, Selection::point(pos));
                     }
 
                     editor.ensure_cursor_in_view(view_id);
@@ -1032,7 +1032,7 @@ impl EditorView {
             }
 
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                let current_view = cxt.editor.tabs[cxt.editor.active_tab].tree.focus;
+                let current_view = cxt.editor.tabs[cxt.editor.active_tab].tree().focus;
 
                 let direction = match event.kind {
                     MouseEventKind::ScrollUp => Direction::Backward,
@@ -1041,21 +1041,22 @@ impl EditorView {
                 };
 
                 match pos_and_view(cxt.editor, row, column, false) {
-                    Some((_, view_id)) => cxt.editor.tabs[cxt.editor.active_tab].tree.focus = view_id,
+                    Some((_, view_id)) => cxt.editor.tabs[cxt.editor.active_tab].tree_mut().focus = view_id,
                     None => return EventResult::Ignored(None),
                 }
 
                 let offset = config.scroll_lines.unsigned_abs();
                 commands::scroll(cxt, offset, direction, false);
 
-                cxt.editor.tabs[cxt.editor.active_tab].tree.focus = current_view;
+                cxt.editor.tabs[cxt.editor.active_tab].tree_mut().focus = current_view;
                 cxt.editor.ensure_cursor_in_view(current_view);
 
                 EventResult::Consumed(None)
             }
 
             MouseEventKind::Up(MouseButton::Left) => {
-                let mouse_down_range = cxt.editor.tabs[cxt.editor.active_tab].mouse_down_range.take();
+                let mouse_down_range = cxt.editor.tabs[cxt.editor.active_tab].mouse_down_range().clone();
+                cxt.editor.tabs[cxt.editor.active_tab].set_mouse_down_range(None);
                 let (view, doc) = current!(cxt.editor);
 
                 let should_yank = match mouse_down_range {
@@ -1188,9 +1189,9 @@ impl Component for EditorView {
                         None
                     } else {
                         let callback: crate::compositor::Callback =
-                            Box::new(move |compositor, cx| {
+                            Box::new(move |editor: &mut Editor| {
                                 for callback in callbacks {
-                                    callback(compositor, cx)
+                                    callback(editor)
                                 }
                             });
                         Some(callback)
@@ -1219,11 +1220,11 @@ impl Component for EditorView {
         let config = cx.editor.config();
 
         // Resize our tree to match the given area
-        cx.editor.tabs[self.tab_index].tree.resize(area);
+        cx.editor.tabs[self.tab_index].tree_mut().resize(area);
 
         let dv = &cx.editor.tabs[self.tab_index];
-        for (view, is_focused) in dv.tree.views() {
-            self.render_view(cx.editor, &cx.editor.tabs[self.tab_index].doc, view, area, surface, is_focused);
+        for (view, is_focused) in dv.tree().views() {
+            self.render_view(cx.editor, cx.editor.tabs[self.tab_index].doc(), view, area, surface, is_focused);
         }
 
         if config.auto_info {
@@ -1236,9 +1237,9 @@ impl Component for EditorView {
 
     fn cursor(&self, _area: Rect, editor: &Editor) -> (Option<Position>, CursorKind) {
         let dv = &editor.tabs[self.tab_index];
-        let view = dv.tree.get(dv.tree.focus);
-        let doc = &dv.doc;
-        let cursor_pos = dv.cursor_cache.get(view, doc);
+        let view = dv.tree().get(dv.tree().focus);
+        let doc = dv.doc();
+        let cursor_pos = dv.cursor_cache().get(view, doc);
         let pos = cursor_pos.map(|mut pos| {
             let inner = view.inner_area(doc);
             pos.col += inner.x as usize;
@@ -1273,7 +1274,7 @@ impl crate::ui::app::Application for EditorView {
     }
 
     fn name(&self, editor: &Editor) -> String {
-        match editor.tabs.get(self.tab_index).and_then(|dv| dv.doc.path()) {
+        match editor.tabs.get(self.tab_index).and_then(|dv| dv.doc().path()) {
             Some(p) => p
                 .file_name()
                 .unwrap_or_default()
@@ -1312,7 +1313,7 @@ impl crate::ui::app::Application for EditorView {
     }
 
     fn icon_path(&self, editor: &Editor) -> Option<PathBuf> {
-        editor.tabs[self.tab_index].doc.path().cloned()
+        editor.tabs[self.tab_index].doc().path().cloned()
     }
 }
 

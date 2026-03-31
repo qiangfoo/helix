@@ -97,9 +97,9 @@ impl Editor {
 
         // In the read-only viewer, the single doc is swapped in from the active tab.
         // Workspace edits apply to it directly.
-        let doc_id = self.tabs[self.active_tab].doc.id();
+        let doc_id = self.tabs[self.active_tab].doc().id();
 
-        let doc = &mut self.tabs[self.active_tab].doc;
+        let doc = self.tabs[self.active_tab].doc_mut();
         if let Some(version) = version {
             if version != doc.version() {
                 let err = format!("outdated workspace edit for {path:?}");
@@ -111,11 +111,10 @@ impl Editor {
 
         // Need to determine a view for apply/append_changes_to_history
         let view_id = self.get_synced_view_id(doc_id);
-        let dv = &mut self.tabs[self.active_tab];
-        let doc = &mut dv.doc;
+        let (doc, tree) = self.tabs[self.active_tab].doc_and_tree_mut();
 
         let transaction = generate_transaction_from_edits(doc.text(), text_edits, offset_encoding);
-        let view = dv.tree.get_mut(view_id);
+        let view = tree.get_mut(view_id);
         doc.apply(&transaction, view.id);
         doc.append_changes_to_history(view);
         Ok(())
@@ -289,8 +288,8 @@ impl Editor {
         version: Option<i32>,
         mut diagnostics: Vec<lsp::Diagnostic>,
     ) {
-        let doc_matches = self.tabs[self.active_tab].doc.uri().is_some_and(|u| u == uri);
-        let doc = if doc_matches { Some(&mut self.tabs[self.active_tab].doc) } else { None };
+        let doc_matches = self.tabs[self.active_tab].doc().uri().is_some_and(|u| u == uri);
+        let doc = if doc_matches { Some(self.tabs[self.active_tab].doc_mut()) } else { None };
 
         if let Some((version, doc)) = version.zip(doc.as_ref()) {
             if version != doc.version() {
@@ -391,7 +390,7 @@ pub fn register_hooks(_handlers: &Handlers) {
     register_hook!(move |event: &mut LanguageServerInitialized<'_>| {
         let language_server = event.editor.language_server_by_id(event.server_id).unwrap();
 
-        let doc = &event.editor.tabs[event.editor.active_tab].doc;
+        let doc = event.editor.tabs[event.editor.active_tab].doc();
         if doc.supports_language_server(event.server_id) {
             if let Some(url) = doc.url() {
                 let language_id = doc.language_id().map(ToOwned::to_owned).unwrap_or_default();

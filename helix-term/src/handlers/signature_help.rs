@@ -13,7 +13,6 @@ use tokio::sync::mpsc::Sender;
 use tokio::time::Instant;
 
 use crate::commands::Open;
-use crate::compositor::Compositor;
 use crate::events::{OnModeSwitch, PostInsertChar};
 use crate::handlers::Handlers;
 use crate::ui::lsp::signature_help::{Signature, SignatureHelp};
@@ -95,7 +94,7 @@ impl helix_event::AsyncHook for SignatureHelpHandler {
         let invocation = self.trigger.take().unwrap();
         self.state = State::Pending;
         let handle = self.task_controller.restart();
-        job::dispatch_blocking(move |editor, _| request_signature_help(editor, invocation, handle))
+        job::dispatch_blocking(move |editor| request_signature_help(editor, invocation, handle))
     }
 }
 
@@ -126,8 +125,8 @@ pub fn request_signature_help(
     tokio::spawn(async move {
         match cancelable_future(future, cancel).await {
             Some(Ok(res)) => {
-                job::dispatch(move |editor, compositor| {
-                    show_signature_help(editor, compositor, invoked, res)
+                job::dispatch(move |editor| {
+                    show_signature_help(editor, invoked, res)
                 })
                 .await
             }
@@ -164,14 +163,14 @@ fn active_param_range(
 
 pub fn show_signature_help(
     editor: &mut Editor,
-    compositor: &mut Compositor,
     invoked: SignatureHelpInvoked,
     response: Option<lsp::SignatureHelp>,
 ) {
+    use crate::layers::EditorLayers;
     let config = &editor.config();
 
     if !(config.lsp.auto_signature_help
-        || SignatureHelp::visible_popup(compositor).is_some()
+        || SignatureHelp::visible_popup(editor).is_some()
         || invoked == SignatureHelpInvoked::Manual)
     {
         return;
@@ -196,7 +195,7 @@ pub fn show_signature_help(
                 &editor.handlers.signature_hints,
                 SignatureHelpEvent::RequestComplete { open: false },
             );
-            compositor.remove(SignatureHelp::ID);
+            editor.remove_layer(SignatureHelp::ID);
             return;
         }
     };
@@ -205,8 +204,11 @@ pub fn show_signature_help(
         SignatureHelpEvent::RequestComplete { open: true },
     );
 
-    let doc = doc!(editor);
-    let language = doc.language_name().unwrap_or("");
+    let language = {
+        let doc = doc!(editor);
+        doc.language_name().unwrap_or("").to_string()
+    };
+    let syn_loader = Arc::clone(&editor.syn_loader);
 
     if response.signatures.is_empty() {
         return;
@@ -235,7 +237,7 @@ pub fn show_signature_help(
         })
         .collect();
 
-    let old_popup = compositor.find_id::<Popup<SignatureHelp>>(SignatureHelp::ID);
+    let old_popup = editor.find_layer_id::<Popup<SignatureHelp>>(SignatureHelp::ID);
     let lsp_signature = response.active_signature.map(|s| s as usize);
 
     // take the new suggested lsp signature if changed
@@ -259,8 +261,8 @@ pub fn show_signature_help(
         .unwrap_or(lsp_signature.unwrap_or_default());
 
     let contents = SignatureHelp::new(
-        language.to_string(),
-        Arc::clone(&editor.syn_loader),
+        language,
+        syn_loader,
         active_signature,
         lsp_signature,
         signatures,
@@ -271,7 +273,7 @@ pub fn show_signature_help(
         .position_bias(Open::Above)
         .ignore_escape_key(true);
 
-    compositor.replace_or_push(SignatureHelp::ID, popup);
+    editor.replace_or_push_layer(SignatureHelp::ID, popup);
 }
 
 fn signature_help_post_insert_char_hook(
@@ -318,8 +320,9 @@ pub(super) fn register_hooks(handlers: &Handlers) {
         match (event.old_mode, event.new_mode) {
             (Mode::Normal, _) => {
                 send_blocking(&tx, SignatureHelpEvent::Cancel);
-                event.cx.callback.push(Box::new(|compositor, _| {
-                    compositor.remove(SignatureHelp::ID);
+                event.cx.callback.push(Box::new(|editor: &mut helix_view::Editor| {
+                    use crate::layers::EditorLayers;
+                    editor.remove_layer(SignatureHelp::ID);
                 }));
             }
             (_, Mode::Normal) => {

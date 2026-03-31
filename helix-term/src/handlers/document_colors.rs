@@ -33,7 +33,7 @@ impl helix_event::AsyncHook for DocumentColorsHandler {
     fn finish_debounce(&mut self) {
         let docs = std::mem::take(&mut self.docs);
 
-        job::dispatch_blocking(move |editor, _compositor| {
+        job::dispatch_blocking(move |editor| {
             for doc in docs {
                 request_document_colors(editor, doc);
             }
@@ -46,12 +46,12 @@ fn request_document_colors(editor: &mut Editor, doc_id: AppId) {
         return;
     }
 
-    if editor.tabs[editor.active_tab].doc.id() != doc_id {
+    if editor.tabs[editor.active_tab].doc().id() != doc_id {
         return;
     }
 
-    let cancel = editor.tabs[editor.active_tab].doc.color_swatch_controller.restart();
-    let doc = &editor.tabs[editor.active_tab].doc;
+    let cancel = editor.tabs[editor.active_tab].doc_mut().color_swatch_controller.restart();
+    let doc = editor.tabs[editor.active_tab].doc();
 
     let mut seen_language_servers = HashSet::new();
     let mut futures: FuturesOrdered<_> = doc
@@ -97,7 +97,7 @@ fn request_document_colors(editor: &mut Editor, doc_id: AppId) {
                 None => return,
             }
         }
-        job::dispatch(move |editor, _| attach_document_colors(editor, doc_id, all_colors)).await;
+        job::dispatch(move |editor| attach_document_colors(editor, doc_id, all_colors)).await;
     });
 }
 
@@ -110,10 +110,10 @@ fn attach_document_colors(
         return;
     }
 
-    if editor.tabs[editor.active_tab].doc.id() != doc_id {
+    if editor.tabs[editor.active_tab].doc().id() != doc_id {
         return;
     }
-    let doc = &mut editor.tabs[editor.active_tab].doc;
+    let doc = editor.tabs[editor.active_tab].doc_mut();
 
     if doc_colors.is_empty() {
         doc.color_swatches.take();
@@ -186,7 +186,7 @@ pub(super) fn register_hooks(handlers: &Handlers) {
     });
 
     register_hook!(move |event: &mut LanguageServerInitialized<'_>| {
-        let doc_id = event.editor.tabs[event.editor.active_tab].doc.id();
+        let doc_id = event.editor.tabs[event.editor.active_tab].doc().id();
         request_document_colors(event.editor, doc_id);
 
         Ok(())
@@ -194,11 +194,11 @@ pub(super) fn register_hooks(handlers: &Handlers) {
 
     register_hook!(move |event: &mut LanguageServerExited<'_>| {
         // Clear and re-request color swatches when a server exits.
-        if event.editor.tabs[event.editor.active_tab].doc.supports_language_server(event.server_id) {
-            event.editor.tabs[event.editor.active_tab].doc.color_swatches.take();
+        if event.editor.tabs[event.editor.active_tab].doc().supports_language_server(event.server_id) {
+            event.editor.tabs[event.editor.active_tab].doc_mut().color_swatches.take();
         }
 
-        let doc_id = event.editor.tabs[event.editor.active_tab].doc.id();
+        let doc_id = event.editor.tabs[event.editor.active_tab].doc().id();
         request_document_colors(event.editor, doc_id);
 
         Ok(())

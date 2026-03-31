@@ -12,9 +12,8 @@
 #[macro_export]
 macro_rules! current {
     ($editor:expr) => {{
-        let dv = &mut $editor.tabs[$editor.active_tab];
-        let view = dv.tree.get_mut(dv.tree.focus);
-        let doc = &mut dv.doc;
+        let (doc, tree) = $editor.tabs[$editor.active_tab].doc_and_tree_mut();
+        let view = tree.get_mut(tree.focus);
         (view, doc)
     }};
 }
@@ -22,9 +21,10 @@ macro_rules! current {
 #[macro_export]
 macro_rules! current_ref {
     ($editor:expr) => {{
-        let dv = &$editor.tabs[$editor.active_tab];
-        let view = dv.tree.get(dv.tree.focus);
-        let doc = &dv.doc;
+        let tab = &$editor.tabs[$editor.active_tab];
+        let tree = tab.tree();
+        let view = tree.get(tree.focus);
+        let doc = tab.doc();
         (view, doc)
     }};
 }
@@ -34,7 +34,7 @@ macro_rules! current_ref {
 #[macro_export]
 macro_rules! doc_mut {
     ($editor:expr) => {{
-        &mut $editor.tabs[$editor.active_tab].doc
+        $editor.tabs[$editor.active_tab].doc_mut()
     }};
 }
 
@@ -43,11 +43,12 @@ macro_rules! doc_mut {
 #[macro_export]
 macro_rules! view_mut {
     ($editor:expr, $id:expr) => {{
-        $editor.tabs[$editor.active_tab].tree.get_mut($id)
+        $editor.tabs[$editor.active_tab].tree_mut().get_mut($id)
     }};
     ($editor:expr) => {{
-        let dv = &mut $editor.tabs[$editor.active_tab];
-        dv.tree.get_mut(dv.tree.focus)
+        let tab = &mut $editor.tabs[$editor.active_tab];
+        let focus = tab.tree().focus;
+        tab.tree_mut().get_mut(focus)
     }};
 }
 
@@ -56,17 +57,18 @@ macro_rules! view_mut {
 #[macro_export]
 macro_rules! view {
     ($editor:expr, $id:expr) => {{
-        $editor.tabs[$editor.active_tab].tree.get($id)
+        $editor.tabs[$editor.active_tab].tree().get($id)
     }};
     ($editor:expr) => {{
-        let dv = &$editor.tabs[$editor.active_tab];
-        dv.tree.get(dv.tree.focus)
+        let tab = &$editor.tabs[$editor.active_tab];
+        let tree = tab.tree();
+        tree.get(tree.focus)
     }};
 }
 
 #[macro_export]
 macro_rules! doc {
     ($editor:expr) => {{
-        &$editor.tabs[$editor.active_tab].doc
+        $editor.tabs[$editor.active_tab].doc()
     }};
 }

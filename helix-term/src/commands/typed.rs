@@ -92,11 +92,12 @@ fn open_impl(cx: &mut compositor::Context, args: Args, action: Action) -> anyhow
         // message
         if let Ok(true) = std::fs::canonicalize(&path).map(|p| p.is_dir()) {
             let callback = async move {
-                let call: job::Callback = job::Callback::EditorCompositor(Box::new(
-                    move |editor: &mut Editor, compositor: &mut Compositor| {
+                let call: job::Callback = job::Callback::Editor(Box::new(
+                    move |editor: &mut Editor| {
+                        use crate::layers::EditorLayers;
                         let picker =
                             ui::file_picker(editor, path.into_owned()).with_default_action(action);
-                        compositor.push(Box::new(overlaid(picker)));
+                        editor.push_layer(Box::new(overlaid(picker)));
                     },
                 ));
                 Ok(call)
@@ -111,11 +112,9 @@ fn open_impl(cx: &mut compositor::Context, args: Args, action: Action) -> anyhow
                 cx.editor.config.clone(),
                 cx.editor.syn_loader.clone(),
             )?;
-            let callback = crate::job::Callback::EditorCompositor(Box::new(
-                move |editor: &mut Editor, compositor: &mut Compositor| {
-                    if let Some(tab_mgr) = compositor.find::<crate::ui::TabManager>() {
-                        tab_mgr.new_editor_tab(doc, editor);
-                    }
+            let callback = crate::job::Callback::Editor(Box::new(
+                move |editor: &mut Editor| {
+                    crate::ui::TabManager::add_editor_tab(editor, doc);
                 },
             ));
             cx.jobs.callback(async { Ok(callback) });
@@ -202,11 +201,9 @@ fn new_file(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> an
 
     // Create a new empty document as a new tab
     let doc = Document::default(cx.editor.config.clone(), cx.editor.syn_loader.clone());
-    let callback = crate::job::Callback::EditorCompositor(Box::new(
-        move |editor: &mut Editor, compositor: &mut Compositor| {
-            if let Some(tab_mgr) = compositor.find::<crate::ui::TabManager>() {
-                tab_mgr.new_editor_tab(doc, editor);
-            }
+    let callback = crate::job::Callback::Editor(Box::new(
+        move |editor: &mut Editor| {
+            crate::ui::TabManager::add_editor_tab(editor, doc);
         },
     ));
     cx.jobs.callback(async { Ok(callback) });
@@ -689,18 +686,19 @@ fn reload_all(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> 
         }
 
         {
-            let dv = &mut cx.editor.tabs[cx.editor.active_tab];
-            let view = dv.tree.get_mut(view_ids[0]);
-            view.sync_changes(&mut dv.doc);
+            let tab = &mut cx.editor.tabs[cx.editor.active_tab];
+            let (doc, tree) = tab.doc_and_tree_mut();
+            let view = tree.get_mut(view_ids[0]);
+            view.sync_changes(doc);
 
             let diff_providers = &cx.editor.diff_providers;
-            if let Err(error) = dv.doc.reload(dv.tree.get_mut(view_ids[0]), diff_providers) {
+            if let Err(error) = doc.reload(tree.get_mut(view_ids[0]), diff_providers) {
                 cx.editor.set_error(format!("{}", error));
                 return Ok(());
             }
         }
 
-        if let Some(path) = cx.editor.tabs[cx.editor.active_tab].doc.path() {
+        if let Some(path) = cx.editor.tabs[cx.editor.active_tab].doc().path() {
             cx.editor
                 .language_servers
                 .file_event_handler
@@ -708,9 +706,10 @@ fn reload_all(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> 
         }
 
         for vid in view_ids {
-            let dv = &mut cx.editor.tabs[cx.editor.active_tab];
-            let view = dv.tree.get_mut(vid);
-            view.ensure_cursor_in_view(&mut dv.doc, scrolloff);
+            let tab = &mut cx.editor.tabs[cx.editor.active_tab];
+            let (doc, tree) = tab.doc_and_tree_mut();
+            let view = tree.get_mut(vid);
+            view.ensure_cursor_in_view(doc, scrolloff);
         }
     }
 
@@ -752,8 +751,9 @@ fn lsp_workspace_command(
             })
             .collect::<Vec<_>>();
         let callback = async move {
-            let call: job::Callback = Callback::EditorCompositor(Box::new(
-                move |_editor: &mut Editor, compositor: &mut Compositor| {
+            let call: job::Callback = Callback::Editor(Box::new(
+                move |editor: &mut Editor| {
+                    use crate::layers::EditorLayers;
                     let columns = [ui::PickerColumn::new(
                         "title",
                         |(_ls_id, command): &(_, helix_lsp::lsp::Command), _| {
@@ -769,7 +769,7 @@ fn lsp_workspace_command(
                             cx.editor.execute_lsp_command(command.clone(), *ls_id);
                         },
                     );
-                    compositor.push(Box::new(overlaid(picker)))
+                    editor.push_layer(Box::new(overlaid(picker)))
                 },
             ));
             Ok(call)
@@ -872,7 +872,7 @@ fn lsp_restart(cx: &mut compositor::Context, args: Args, event: PromptEvent) -> 
     }
 
     // Refresh language servers for the single document if applicable.
-    let should_refresh = cx.editor.tabs[cx.editor.active_tab].doc.language_config().map_or(false, |config| {
+    let should_refresh = cx.editor.tabs[cx.editor.active_tab].doc().language_config().map_or(false, |config| {
         config.language_servers.iter().any(|ls| {
             language_servers
                 .iter()
@@ -881,7 +881,7 @@ fn lsp_restart(cx: &mut compositor::Context, args: Args, event: PromptEvent) -> 
     });
 
     if should_refresh {
-        let doc_id = cx.editor.tabs[cx.editor.active_tab].doc.id();
+        let doc_id = cx.editor.tabs[cx.editor.active_tab].doc().id();
         cx.editor.refresh_language_servers(doc_id);
     }
 
@@ -922,7 +922,7 @@ fn lsp_stop(cx: &mut compositor::Context, args: Args, event: PromptEvent) -> any
     for ls_name in &language_servers {
         cx.editor.language_servers.stop(ls_name);
 
-        let doc = &mut cx.editor.tabs[cx.editor.active_tab].doc;
+        let doc = cx.editor.tabs[cx.editor.active_tab].doc_mut();
         if let Some(client) = doc.remove_language_server_by_name(ls_name) {
             doc.clear_diagnostics_for_language_server(client.id());
             doc.reset_all_inlay_hints();
@@ -951,11 +951,12 @@ fn tree_sitter_scopes(
     let contents = format!("```json\n{:?}\n````", scopes);
 
     let callback = async move {
-        let call: job::Callback = Callback::EditorCompositor(Box::new(
-            move |editor: &mut Editor, compositor: &mut Compositor| {
+        let call: job::Callback = Callback::Editor(Box::new(
+            move |editor: &mut Editor| {
+                use crate::layers::EditorLayers;
                 let contents = ui::Markdown::new(contents, editor.syn_loader.clone());
                 let popup = Popup::new("hover", contents).auto_close(true);
-                compositor.replace_or_push("hover", popup);
+                editor.replace_or_push_layer("hover", popup);
             },
         ));
         Ok(call)
@@ -1019,11 +1020,12 @@ fn tree_sitter_highlight_name(
         });
 
     let callback = async move {
-        let call: job::Callback = Callback::EditorCompositor(Box::new(
-            move |editor: &mut Editor, compositor: &mut Compositor| {
+        let call: job::Callback = Callback::Editor(Box::new(
+            move |editor: &mut Editor| {
+                use crate::layers::EditorLayers;
                 let content = ui::Markdown::new(content, editor.syn_loader.clone());
                 let popup = Popup::new("hover", content).auto_close(true);
-                compositor.replace_or_push("hover", popup);
+                editor.replace_or_push_layer("hover", popup);
             },
         ));
         Ok(call)
@@ -1069,11 +1071,12 @@ fn tree_sitter_layers(
             });
 
     let callback = async move {
-        let call: job::Callback = Callback::EditorCompositor(Box::new(
-            move |editor: &mut Editor, compositor: &mut Compositor| {
+        let call: job::Callback = Callback::Editor(Box::new(
+            move |editor: &mut Editor| {
+                use crate::layers::EditorLayers;
                 let content = ui::Markdown::new(languages, editor.syn_loader.clone());
                 let popup = Popup::new("hover", content).auto_close(true);
-                compositor.replace_or_push("hover", popup);
+                editor.replace_or_push_layer("hover", popup);
             },
         ));
         Ok(call)
@@ -1119,11 +1122,9 @@ fn vsplit_new(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> 
 
     // In read-only viewer, create a new tab with an empty document
     let doc = Document::default(cx.editor.config.clone(), cx.editor.syn_loader.clone());
-    let callback = crate::job::Callback::EditorCompositor(Box::new(
-        move |editor: &mut Editor, compositor: &mut Compositor| {
-            if let Some(tab_mgr) = compositor.find::<crate::ui::TabManager>() {
-                tab_mgr.new_editor_tab(doc, editor);
-            }
+    let callback = crate::job::Callback::Editor(Box::new(
+        move |editor: &mut Editor| {
+            crate::ui::TabManager::add_editor_tab(editor, doc);
         },
     ));
     cx.jobs.callback(async { Ok(callback) });
@@ -1138,11 +1139,9 @@ fn hsplit_new(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> 
 
     // In read-only viewer, create a new tab with an empty document
     let doc = Document::default(cx.editor.config.clone(), cx.editor.syn_loader.clone());
-    let callback = crate::job::Callback::EditorCompositor(Box::new(
-        move |editor: &mut Editor, compositor: &mut Compositor| {
-            if let Some(tab_mgr) = compositor.find::<crate::ui::TabManager>() {
-                tab_mgr.new_editor_tab(doc, editor);
-            }
+    let callback = crate::job::Callback::Editor(Box::new(
+        move |editor: &mut Editor| {
+            crate::ui::TabManager::add_editor_tab(editor, doc);
         },
     ));
     cx.jobs.callback(async { Ok(callback) });
@@ -1165,11 +1164,9 @@ fn tutor(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> anyho
     )?;
     // Unset path to prevent accidentally saving to the original tutor file.
     doc.set_path(None);
-    let callback = crate::job::Callback::EditorCompositor(Box::new(
-        move |editor: &mut Editor, compositor: &mut Compositor| {
-            if let Some(tab_mgr) = compositor.find::<crate::ui::TabManager>() {
-                tab_mgr.new_editor_tab(doc, editor);
-            }
+    let callback = crate::job::Callback::Editor(Box::new(
+        move |editor: &mut Editor| {
+            crate::ui::TabManager::add_editor_tab(editor, doc);
         },
     ));
     cx.jobs.callback(async { Ok(callback) });
@@ -1177,7 +1174,8 @@ fn tutor(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> anyho
 }
 
 fn abort_goto_line_number_preview(cx: &mut compositor::Context) {
-    if let Some(last_selection) = cx.editor.tabs[cx.editor.active_tab].last_selection.take() {
+    if let Some(last_selection) = cx.editor.tabs[cx.editor.active_tab].last_selection().clone() {
+        cx.editor.tabs[cx.editor.active_tab].set_last_selection(None);
         let scrolloff = cx.editor.config().scrolloff;
 
         let (view, doc) = current!(cx.editor);
@@ -1187,10 +1185,10 @@ fn abort_goto_line_number_preview(cx: &mut compositor::Context) {
 }
 
 fn update_goto_line_number_preview(cx: &mut compositor::Context, args: Args) -> anyhow::Result<()> {
-    if cx.editor.tabs[cx.editor.active_tab].last_selection.is_none() {
+    if cx.editor.tabs[cx.editor.active_tab].last_selection().is_none() {
         let (view, doc) = current!(cx.editor);
         let sel = doc.selection(view.id).clone();
-        cx.editor.tabs[cx.editor.active_tab].last_selection = Some(sel);
+        cx.editor.tabs[cx.editor.active_tab].set_last_selection(Some(sel));
     }
 
     let scrolloff = cx.editor.config().scrolloff;
@@ -1227,9 +1225,10 @@ pub(super) fn goto_line_number(
             let last_selection = cx
                 .editor
                 .tabs[cx.editor.active_tab]
-                .last_selection
-                .take()
+                .last_selection()
+                .clone()
                 .expect("update_goto_line_number_preview should always set last_selection");
+            cx.editor.tabs[cx.editor.active_tab].set_last_selection(None);
 
             let (view, doc) = current!(cx.editor);
             view.jumps.push((doc.id(), last_selection));
@@ -1443,11 +1442,12 @@ fn tree_sitter_subtree(
             contents.push_str("\n```");
 
             let callback = async move {
-                let call: job::Callback = Callback::EditorCompositor(Box::new(
-                    move |editor: &mut Editor, compositor: &mut Compositor| {
+                let call: job::Callback = Callback::Editor(Box::new(
+                    move |editor: &mut Editor| {
+                        use crate::layers::EditorLayers;
                         let contents = ui::Markdown::new(contents, editor.syn_loader.clone());
                         let popup = Popup::new("hover", contents).auto_close(true);
-                        compositor.replace_or_push("hover", popup);
+                        editor.replace_or_push_layer("hover", popup);
                     },
                 ));
                 Ok(call)
@@ -1477,11 +1477,9 @@ fn open_config(
         cx.editor.config.clone(),
         cx.editor.syn_loader.clone(),
     )?;
-    let callback = crate::job::Callback::EditorCompositor(Box::new(
-        move |editor: &mut Editor, compositor: &mut Compositor| {
-            if let Some(tab_mgr) = compositor.find::<crate::ui::TabManager>() {
-                tab_mgr.new_editor_tab(doc, editor);
-            }
+    let callback = crate::job::Callback::Editor(Box::new(
+        move |editor: &mut Editor| {
+            crate::ui::TabManager::add_editor_tab(editor, doc);
         },
     ));
     cx.jobs.callback(async { Ok(callback) });
@@ -1505,11 +1503,9 @@ fn open_workspace_config(
         cx.editor.config.clone(),
         cx.editor.syn_loader.clone(),
     )?;
-    let callback = crate::job::Callback::EditorCompositor(Box::new(
-        move |editor: &mut Editor, compositor: &mut Compositor| {
-            if let Some(tab_mgr) = compositor.find::<crate::ui::TabManager>() {
-                tab_mgr.new_editor_tab(doc, editor);
-            }
+    let callback = crate::job::Callback::Editor(Box::new(
+        move |editor: &mut Editor| {
+            crate::ui::TabManager::add_editor_tab(editor, doc);
         },
     ));
     cx.jobs.callback(async { Ok(callback) });
@@ -1529,11 +1525,9 @@ fn open_log(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> an
         cx.editor.config.clone(),
         cx.editor.syn_loader.clone(),
     )?;
-    let callback = crate::job::Callback::EditorCompositor(Box::new(
-        move |editor: &mut Editor, compositor: &mut Compositor| {
-            if let Some(tab_mgr) = compositor.find::<crate::ui::TabManager>() {
-                tab_mgr.new_editor_tab(doc, editor);
-            }
+    let callback = crate::job::Callback::Editor(Box::new(
+        move |editor: &mut Editor| {
+            crate::ui::TabManager::add_editor_tab(editor, doc);
         },
     ));
     cx.jobs.callback(async { Ok(callback) });
@@ -1560,8 +1554,9 @@ fn redraw(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> anyh
 
     let callback = Box::pin(async move {
         let call: job::Callback =
-            job::Callback::EditorCompositor(Box::new(|_editor, compositor| {
-                compositor.need_full_redraw();
+            job::Callback::Editor(Box::new(|editor| {
+                use crate::layers::EditorLayers;
+                editor.need_full_redraw();
             }));
 
         Ok(call)
@@ -2290,8 +2285,9 @@ pub fn command_mode_callback(editor: &Editor) -> compositor::Callback {
     prompt.doc_fn = Box::new(command_line_doc);
     prompt.recalculate_completion(editor);
 
-    Box::new(move |compositor: &mut compositor::Compositor, _ctx: &mut compositor::Context| {
-        compositor.push(Box::new(prompt));
+    Box::new(move |editor: &mut Editor| {
+        use crate::layers::EditorLayers;
+        editor.push_layer(Box::new(prompt));
     })
 }
 

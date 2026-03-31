@@ -3,13 +3,10 @@ use helix_event::{runtime_local, send_blocking};
 use helix_view::Editor;
 use once_cell::sync::OnceCell;
 
-use crate::compositor::Compositor;
-
 use futures_util::future::{BoxFuture, Future, FutureExt};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
-pub type EditorCompositorCallback = Box<dyn FnOnce(&mut Editor, &mut Compositor) + Send>;
 pub type EditorCallback = Box<dyn FnOnce(&mut Editor) + Send>;
 
 runtime_local! {
@@ -20,20 +17,19 @@ pub async fn dispatch_callback(job: Callback) {
     let _ = JOB_QUEUE.wait().send(job).await;
 }
 
-pub async fn dispatch(job: impl FnOnce(&mut Editor, &mut Compositor) + Send + 'static) {
+pub async fn dispatch(job: impl FnOnce(&mut Editor) + Send + 'static) {
     let _ = JOB_QUEUE
         .wait()
-        .send(Callback::EditorCompositor(Box::new(job)))
+        .send(Callback::Editor(Box::new(job)))
         .await;
 }
 
-pub fn dispatch_blocking(job: impl FnOnce(&mut Editor, &mut Compositor) + Send + 'static) {
+pub fn dispatch_blocking(job: impl FnOnce(&mut Editor) + Send + 'static) {
     let jobs = JOB_QUEUE.wait();
-    send_blocking(jobs, Callback::EditorCompositor(Box::new(job)))
+    send_blocking(jobs, Callback::Editor(Box::new(job)))
 }
 
 pub enum Callback {
-    EditorCompositor(EditorCompositorCallback),
     Editor(EditorCallback),
 }
 
@@ -102,13 +98,11 @@ impl Jobs {
     pub fn handle_callback(
         &self,
         editor: &mut Editor,
-        compositor: &mut Compositor,
         call: anyhow::Result<Option<Callback>>,
     ) {
         match call {
             Ok(None) => {}
             Ok(Some(call)) => match call {
-                Callback::EditorCompositor(call) => call(editor, compositor),
                 Callback::Editor(call) => call(editor),
             },
             Err(e) => {
@@ -135,7 +129,6 @@ impl Jobs {
     pub async fn finish(
         &mut self,
         editor: &mut Editor,
-        mut compositor: Option<&mut Compositor>,
     ) -> anyhow::Result<()> {
         log::debug!("waiting on jobs...");
         let mut wait_futures = std::mem::take(&mut self.wait_futures);
@@ -146,16 +139,8 @@ impl Jobs {
                     wait_futures = tail;
 
                     if let Some(callback) = callback {
-                        // clippy doesn't realize this is an error without the derefs
-                        #[allow(clippy::needless_option_as_deref)]
                         match callback {
-                            Callback::EditorCompositor(call) if compositor.is_some() => {
-                                call(editor, compositor.as_deref_mut().unwrap())
-                            }
                             Callback::Editor(call) => call(editor),
-
-                            // skip callbacks for which we don't have the necessary references
-                            _ => (),
                         }
                     }
                 }

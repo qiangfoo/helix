@@ -68,11 +68,43 @@ impl TabManager {
         }
 
         let dv = helix_view::DocView::new(doc);
-        let tab_index = editor.add_tab(dv);
+        let tab_index = editor.add_tab(Box::new(dv));
         let keymaps = self.make_keymaps();
         let editor_view = Box::new(EditorView::new(keymaps, tab_index));
         self.add_tab(editor_view);
         editor.active_tab = tab_index;
+    }
+
+    /// Static helper that opens a document in a new editor tab.
+    /// Takes layer_state out of Editor temporarily to avoid double-mutable-borrow.
+    pub fn add_editor_tab(editor: &mut helix_view::Editor, doc: helix_view::Document) {
+        let mut layer_box = std::mem::replace(&mut editor.layer_state, Box::new(()));
+        {
+            let ls = layer_box
+                .downcast_mut::<crate::layers::LayerState>()
+                .expect("Editor.layer_state must be LayerState");
+            let type_name = std::any::type_name::<TabManager>();
+            if let Some(tab_mgr) = ls
+                .layers
+                .iter_mut()
+                .find(|c| c.type_name() == type_name)
+                .and_then(|c| c.as_any_mut().downcast_mut::<TabManager>())
+            {
+                // Remove welcome tab before adding a real tab
+                if tab_mgr.has_welcome_tab() {
+                    tab_mgr.tabs.remove(0);
+                }
+
+                let dv = helix_view::DocView::new(doc);
+                let tab_index = editor.add_tab(Box::new(dv));
+                let keymaps = tab_mgr.make_keymaps();
+                let editor_view = Box::new(EditorView::new(keymaps, tab_index));
+                tab_mgr.tabs.push(editor_view);
+                tab_mgr.active = tab_mgr.tabs.len() - 1;
+                editor.active_tab = tab_index;
+            }
+        }
+        editor.layer_state = layer_box;
     }
 
     /// Add a tab and make it active.
@@ -297,7 +329,7 @@ impl TabManager {
         if area.width.saturating_sub(status_msg_width as u16) > key_width {
             let mut disp = String::new();
             if let Some(dv) = editor.tabs.get(editor.active_tab) {
-                if let Some(count) = dv.count {
+                if let Some(count) = dv.count() {
                     disp.push_str(&count.to_string());
                 }
             }

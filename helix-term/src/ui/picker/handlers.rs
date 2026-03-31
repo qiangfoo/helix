@@ -53,29 +53,39 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> AsyncHook
             return;
         };
 
-        job::dispatch_blocking(move |editor, compositor| {
-            let Some(Overlay {
-                content: picker, ..
-            }) = compositor.find::<Overlay<Picker<T, D>>>()
-            else {
-                return;
-            };
-
-            let Some(CachedPreview::Document(ref mut doc)) = picker.preview_cache.get_mut(&path)
-            else {
-                return;
-            };
-
-            if doc.syntax().is_some() {
-                return;
-            }
-
-            let Some(language) = doc.language_config().map(|config| config.language()) else {
-                return;
-            };
-
+        job::dispatch_blocking(move |editor| {
             let loader = editor.syn_loader.load();
-            let text = doc.text().clone();
+
+            // Take layers out to avoid borrow conflicts
+            let mut layer_box = std::mem::replace(&mut editor.layer_state, Box::new(()));
+            let result = {
+                let ls = layer_box
+                    .downcast_mut::<crate::layers::LayerState>()
+                    .expect("Editor.layer_state must be LayerState");
+                let type_name = std::any::type_name::<Overlay<Picker<T, D>>>();
+                ls.layers
+                    .iter_mut()
+                    .find(|c| c.type_name() == type_name)
+                    .and_then(|c| c.as_any_mut().downcast_mut::<Overlay<Picker<T, D>>>())
+                    .map(|overlay| &mut overlay.content)
+                    .and_then(|picker| {
+                        let doc = match picker.preview_cache.get_mut(&path) {
+                            Some(CachedPreview::Document(doc)) => doc,
+                            _ => return None,
+                        };
+                        if doc.syntax().is_some() {
+                            return None;
+                        }
+                        let language = doc.language_config().map(|config| config.language())?;
+                        let text = doc.text().clone();
+                        Some((language, text))
+                    })
+            };
+            editor.layer_state = layer_box;
+
+            let Some((language, text)) = result else {
+                return;
+            };
 
             tokio::task::spawn_blocking(move || {
                 let syntax = match helix_core::Syntax::new(text.slice(..), language, &loader) {
@@ -86,26 +96,37 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> AsyncHook
                     }
                 };
 
-                job::dispatch_blocking(move |editor, compositor| {
-                    let Some(Overlay {
-                        content: picker, ..
-                    }) = compositor.find::<Overlay<Picker<T, D>>>()
-                    else {
-                        log::info!("picker closed before syntax highlighting finished");
-                        return;
-                    };
-                    let Some(CachedPreview::Document(ref mut doc)) =
-                        picker.preview_cache.get_mut(&path)
-                    else {
-                        return;
-                    };
-                    let diagnostics = helix_view::Editor::doc_diagnostics(
-                        &editor.language_servers,
-                        &editor.diagnostics,
-                        doc,
-                    );
-                    doc.replace_diagnostics(diagnostics, &[], None);
-                    doc.syntax = Some(syntax);
+                job::dispatch_blocking(move |editor| {
+                    // Take layers out to avoid borrow conflicts
+                    let mut layer_box = std::mem::replace(&mut editor.layer_state, Box::new(()));
+                    {
+                        let ls = layer_box
+                            .downcast_mut::<crate::layers::LayerState>()
+                            .expect("Editor.layer_state must be LayerState");
+                        let type_name = std::any::type_name::<Overlay<Picker<T, D>>>();
+                        if let Some(picker) = ls
+                            .layers
+                            .iter_mut()
+                            .find(|c| c.type_name() == type_name)
+                            .and_then(|c| c.as_any_mut().downcast_mut::<Overlay<Picker<T, D>>>())
+                            .map(|overlay| &mut overlay.content)
+                        {
+                            if let Some(CachedPreview::Document(ref mut doc)) =
+                                picker.preview_cache.get_mut(&path)
+                            {
+                                let diagnostics = helix_view::Editor::doc_diagnostics(
+                                    &editor.language_servers,
+                                    &editor.diagnostics,
+                                    doc,
+                                );
+                                doc.replace_diagnostics(diagnostics, &[], None);
+                                doc.syntax = Some(syntax);
+                            }
+                        } else {
+                            log::info!("picker closed before syntax highlighting finished");
+                        }
+                    }
+                    editor.layer_state = layer_box;
                 });
             });
         });
@@ -166,18 +187,33 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> AsyncHook for DynamicQu
         self.last_query = query.clone();
         let callback = self.callback.clone();
 
-        job::dispatch_blocking(move |editor, compositor| {
-            let Some(Overlay {
-                content: picker, ..
-            }) = compositor.find::<Overlay<Picker<T, D>>>()
-            else {
+        job::dispatch_blocking(move |editor| {
+            // Take layers out to avoid borrow conflicts between picker and editor
+            let mut layer_box = std::mem::replace(&mut editor.layer_state, Box::new(()));
+            let result = {
+                let ls = layer_box
+                    .downcast_mut::<crate::layers::LayerState>()
+                    .expect("Editor.layer_state must be LayerState");
+                let type_name = std::any::type_name::<Overlay<Picker<T, D>>>();
+                ls.layers
+                    .iter_mut()
+                    .find(|c| c.type_name() == type_name)
+                    .and_then(|c| c.as_any_mut().downcast_mut::<Overlay<Picker<T, D>>>())
+                    .map(|overlay| &mut overlay.content)
+                    .map(|picker| {
+                        picker.version.fetch_add(1, atomic::Ordering::Relaxed);
+                        picker.matcher.restart(false);
+                        let injector = picker.injector();
+                        let editor_data = picker.editor_data.clone();
+                        (injector, editor_data)
+                    })
+            };
+            editor.layer_state = layer_box;
+
+            let Some((injector, editor_data)) = result else {
                 return;
             };
-            // Increment the version number to cancel any ongoing requests.
-            picker.version.fetch_add(1, atomic::Ordering::Relaxed);
-            picker.matcher.restart(false);
-            let injector = picker.injector();
-            let get_options = (callback)(&query, editor, picker.editor_data.clone(), &injector);
+            let get_options = (callback)(&query, editor, editor_data, &injector);
             tokio::spawn(async move {
                 if let Err(err) = get_options.await {
                     log::info!("Dynamic request failed: {err}");

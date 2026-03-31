@@ -9,7 +9,7 @@ use tui::layout::Alignment;
 use tui::text::Text;
 use tui::widgets::{BorderType, Paragraph, Widget, Wrap};
 
-use crate::compositor::{Component, Compositor, Context, EventResult};
+use crate::compositor::{Component, Context, EventResult};
 
 use crate::alt;
 use crate::ui::Markdown;
@@ -58,8 +58,9 @@ impl SignatureHelp {
         self.lsp_signature
     }
 
-    pub fn visible_popup(compositor: &mut Compositor) -> Option<&mut Popup<Self>> {
-        compositor.find_id::<Popup<Self>>(Self::ID)
+    pub fn visible_popup(editor: &mut helix_view::Editor) -> Option<&mut Popup<Self>> {
+        use crate::layers::EditorLayers;
+        editor.find_layer_id::<Popup<Self>>(Self::ID)
     }
 
     fn signature_index(&self) -> String {

@@ -53,7 +53,7 @@ use arc_swap::access::DynAccess;
 use movement::Movement;
 
 use crate::{
-    compositor::{self, Component, Compositor},
+    compositor::{self, Component},
     filter_picker_entry,
     job::Callback,
     ui::{self, overlay::overlaid, Picker, PickerColumn, Popup, Prompt, PromptEvent},
@@ -102,16 +102,18 @@ impl Context<'_> {
     /// Push a new component onto the compositor.
     pub fn push_layer(&mut self, component: Box<dyn Component>) {
         self.callback
-            .push(Box::new(|compositor: &mut Compositor, _| {
-                compositor.push(component)
+            .push(Box::new(|editor: &mut Editor| {
+                use crate::layers::EditorLayers;
+                editor.push_layer(component)
             }));
     }
 
     /// Call `replace_or_push` on the Compositor
     pub fn replace_or_push_layer<T: Component>(&mut self, id: &'static str, component: T) {
         self.callback
-            .push(Box::new(move |compositor: &mut Compositor, _| {
-                compositor.replace_or_push(id, component);
+            .push(Box::new(move |editor: &mut Editor| {
+                use crate::layers::EditorLayers;
+                editor.replace_or_push_layer(id, component);
             }));
     }
 
@@ -142,7 +144,7 @@ impl Context<'_> {
         callback: F,
     ) where
         T: Send + 'static,
-        F: FnOnce(&mut Editor, &mut Compositor, T) + Send + 'static,
+        F: FnOnce(&mut Editor, T) + Send + 'static,
     {
         self.jobs.callback(make_job_callback(call, callback));
     }
@@ -172,13 +174,13 @@ fn make_job_callback<T, F>(
 ) -> std::pin::Pin<Box<impl Future<Output = Result<Callback, anyhow::Error>>>>
 where
     T: Send + 'static,
-    F: FnOnce(&mut Editor, &mut Compositor, T) + Send + 'static,
+    F: FnOnce(&mut Editor, T) + Send + 'static,
 {
     Box::pin(async move {
         let response = call.await?;
-        let call: job::Callback = Callback::EditorCompositor(Box::new(
-            move |editor: &mut Editor, compositor: &mut Compositor| {
-                callback(editor, compositor, response)
+        let call: job::Callback = Callback::Editor(Box::new(
+            move |editor: &mut Editor| {
+                callback(editor, response)
             },
         ));
         Ok(call)
@@ -254,10 +256,9 @@ impl MappableCommand {
             Self::Static { fun, .. } => (fun)(cx),
             Self::Macro { keys, .. } => {
                 let keys = keys.clone();
-                cx.callback.push(Box::new(move |compositor, cx| {
-                    for key in keys.into_iter() {
-                        compositor.handle_event(&compositor::Event::Key(key), cx);
-                    }
+                cx.callback.push(Box::new(move |editor: &mut Editor| {
+                    use crate::layers::EditorLayers;
+                    editor.queue_macro_keys(keys);
                 }));
             }
         }
@@ -1206,10 +1207,8 @@ fn open_path_as_tab(cx: &mut Context, path: PathBuf) {
         cx.editor.syn_loader.clone(),
     ) {
         Ok(doc) => {
-            let callback: crate::compositor::Callback = Box::new(move |compositor, cx| {
-                if let Some(tab_mgr) = compositor.find::<crate::ui::TabManager>() {
-                    tab_mgr.new_editor_tab(doc, cx.editor);
-                }
+            let callback: crate::compositor::Callback = Box::new(move |editor: &mut Editor| {
+                crate::ui::TabManager::add_editor_tab(editor, doc);
             });
             cx.callback.push(callback);
         }
@@ -2019,7 +2018,7 @@ fn global_search(cx: &mut Context) {
                 .boxed();
         }
 
-        let documents: Vec<_> = std::iter::once(&editor.tabs[editor.active_tab].doc)
+        let documents: Vec<_> = std::iter::once(editor.tabs[editor.active_tab].doc())
             .map(|doc| (doc.path().cloned(), doc.text().to_owned()))
             .collect();
 
@@ -2153,11 +2152,9 @@ fn global_search(cx: &mut Context) {
                 cx.editor.syn_loader.clone(),
             ) {
                 Ok(doc) => {
-                    let callback = crate::job::Callback::EditorCompositor(Box::new(
-                        move |editor: &mut Editor, compositor: &mut crate::compositor::Compositor| {
-                            if let Some(tab_mgr) = compositor.find::<crate::ui::TabManager>() {
-                                tab_mgr.new_editor_tab(doc, editor);
-                            }
+                    let callback = crate::job::Callback::Editor(Box::new(
+                        move |editor: &mut Editor| {
+                            crate::ui::TabManager::add_editor_tab(editor, doc);
                         },
                     ));
                     cx.jobs.callback(async { Ok(callback) });
@@ -2494,25 +2491,37 @@ fn buffer_picker(cx: &mut Context) {
 
     // Gather tab metadata via a compositor callback so we can access TabManager
     cx.callback.push(Box::new(
-        |compositor: &mut Compositor, cx: &mut compositor::Context| {
-            let tab_manager = match compositor.find::<ui::TabManager>() {
-                Some(tm) => tm,
-                None => return,
-            };
-            let active_index = tab_manager.active_index();
+        |editor: &mut Editor| {
+            use crate::layers::EditorLayers;
+            // Take layers out to avoid borrow conflicts
+            let mut layer_box = std::mem::replace(&mut editor.layer_state, Box::new(()));
             let mut items: Vec<TabMeta> = Vec::new();
-
-            for i in 0..tab_manager.tab_count() {
-                let tab = &tab_manager.tabs()[i];
-                let name = tab.name(cx.editor);
-                let path = tab.icon_path(cx.editor);
-                items.push(TabMeta {
-                    tab_index: i,
-                    path,
-                    name,
-                    is_active: i == active_index,
-                });
+            {
+                let ls = layer_box
+                    .downcast_mut::<crate::layers::LayerState>()
+                    .expect("Editor.layer_state must be LayerState");
+                let type_name = std::any::type_name::<ui::TabManager>();
+                if let Some(tab_manager) = ls
+                    .layers
+                    .iter_mut()
+                    .find(|c| c.type_name() == type_name)
+                    .and_then(|c| c.as_any_mut().downcast_mut::<ui::TabManager>())
+                {
+                    let active_index = tab_manager.active_index();
+                    for i in 0..tab_manager.tab_count() {
+                        let tab = &tab_manager.tabs()[i];
+                        let name = tab.name(editor);
+                        let path = tab.icon_path(editor);
+                        items.push(TabMeta {
+                            tab_index: i,
+                            path,
+                            name,
+                            is_active: i == active_index,
+                        });
+                    }
+                }
             }
+            editor.layer_state = layer_box;
 
             let columns = [
                 PickerColumn::new("flags", |meta: &TabMeta, _| {
@@ -2526,8 +2535,8 @@ fn buffer_picker(cx: &mut Context) {
             let picker = Picker::new(columns, 1, items, (), move |cx, meta, _action| {
                 let tab_index = meta.tab_index;
                 cx.jobs.callback(async move {
-                    let callback = crate::job::Callback::EditorCompositor(Box::new(
-                        move |editor, _compositor| {
+                    let callback = crate::job::Callback::Editor(Box::new(
+                        move |editor| {
                             editor.activate_tab(tab_index);
                         },
                     ));
@@ -2538,7 +2547,7 @@ fn buffer_picker(cx: &mut Context) {
                 let path = meta.path.as_deref()?;
                 Some((path.into(), None))
             });
-            compositor.push(Box::new(overlaid(picker)));
+            editor.push_layer(Box::new(overlaid(picker)));
         },
     ));
 }
@@ -2553,15 +2562,16 @@ fn jumplist_picker(cx: &mut Context) {
     }
 
     {
-        let dv = &mut cx.editor.tabs[cx.editor.active_tab];
-        for (view, _) in dv.tree.views_mut() {
-            view.sync_changes(&mut dv.doc);
+        let tab = &mut cx.editor.tabs[cx.editor.active_tab];
+        let (doc, tree) = tab.doc_and_tree_mut();
+        for (view, _) in tree.views_mut() {
+            view.sync_changes(doc);
         }
     }
 
     let new_meta = |view: &View, doc_id: AppId, selection: Selection| {
-        let doc = if cx.editor.tabs[cx.editor.active_tab].doc.id() == doc_id {
-            Some(&cx.editor.tabs[cx.editor.active_tab].doc)
+        let doc = if cx.editor.tabs[cx.editor.active_tab].doc().id() == doc_id {
+            Some(cx.editor.tabs[cx.editor.active_tab].doc())
         } else {
             None
         };
@@ -2613,7 +2623,7 @@ fn jumplist_picker(cx: &mut Context) {
     let picker = Picker::new(
         columns,
         1, // path
-        cx.editor.tabs[cx.editor.active_tab].tree.views().flat_map(|(view, _)| {
+        cx.editor.tabs[cx.editor.active_tab].tree().views().flat_map(|(view, _)| {
             view.jumps
                 .iter()
                 .rev()
@@ -2628,7 +2638,7 @@ fn jumplist_picker(cx: &mut Context) {
         },
     )
     .with_preview(|editor, meta| {
-        let doc = &editor.tabs[editor.active_tab].doc;
+        let doc = editor.tabs[editor.active_tab].doc();
         if doc.id() == meta.id {
             let line = meta.selection.primary().cursor_line(doc.text().slice(..));
             Some((meta.id.into(), Some((line, line))))
@@ -2738,11 +2748,9 @@ fn changed_file_picker(cx: &mut Context) {
             doc.set_path(Some(std::path::Path::new(&name)));
             let loader = cx.editor.syn_loader.load();
             let _ = doc.set_language_by_language_id("diff", &loader);
-            let callback = crate::job::Callback::EditorCompositor(Box::new(
-                move |editor: &mut Editor, compositor: &mut crate::compositor::Compositor| {
-                    if let Some(tab_mgr) = compositor.find::<crate::ui::TabManager>() {
-                        tab_mgr.new_editor_tab(doc, editor);
-                    }
+            let callback = crate::job::Callback::Editor(Box::new(
+                move |editor: &mut Editor| {
+                    crate::ui::TabManager::add_editor_tab(editor, doc);
                 },
             ));
             cx.jobs.callback(async { Ok(callback) });
@@ -2786,10 +2794,29 @@ pub fn command_palette(cx: &mut Context) {
     let count = cx.count;
 
     cx.callback.push(Box::new(
-        move |compositor: &mut Compositor, cx: &mut compositor::Context| {
-            let keymap = compositor.find::<ui::TabManager>().unwrap().active_editor_view().unwrap().keymaps.map()
-                [&cx.editor.mode()]
-                .reverse_map();
+        move |editor: &mut Editor| {
+            use crate::layers::EditorLayers;
+            // Extract keymap from TabManager by temporarily taking layers
+            let keymap = {
+                let mut layer_box = std::mem::replace(&mut editor.layer_state, Box::new(()));
+                let keymap = {
+                    let ls = layer_box
+                        .downcast_mut::<crate::layers::LayerState>()
+                        .expect("Editor.layer_state must be LayerState");
+                    let type_name = std::any::type_name::<ui::TabManager>();
+                    ls.layers
+                        .iter_mut()
+                        .find(|c| c.type_name() == type_name)
+                        .and_then(|c| c.as_any_mut().downcast_mut::<ui::TabManager>())
+                        .and_then(|tm| tm.active_editor_view())
+                        .map(|ev| ev.keymaps.map()[&editor.mode()].reverse_map())
+                };
+                editor.layer_state = layer_box;
+                match keymap {
+                    Some(km) => km,
+                    None => return,
+                }
+            };
 
             let commands = MappableCommand::STATIC_COMMAND_LIST.iter().cloned().chain(
                 typed::TYPABLE_COMMAND_LIST
@@ -2844,7 +2871,7 @@ pub fn command_palette(cx: &mut Context) {
 
                 command.execute(&mut ctx);
 
-                if ctx.editor.tabs[ctx.editor.active_tab].tree.contains(focus) {
+                if ctx.editor.tabs[ctx.editor.active_tab].tree().contains(focus) {
                     let config = ctx.editor.config();
                     let mode = ctx.editor.mode();
                     let (view, doc) = current!(ctx.editor);
@@ -2856,18 +2883,22 @@ pub fn command_palette(cx: &mut Context) {
                     }
                 }
             });
-            compositor.push(Box::new(overlaid(picker)));
+            editor.push_layer(Box::new(overlaid(picker)));
         },
     ));
 }
 
 fn last_picker(cx: &mut Context) {
     // TODO: last picker does not seem to work well with buffer_picker
-    cx.callback.push(Box::new(|compositor, cx| {
-        if let Some(picker) = compositor.last_picker.take() {
-            compositor.push(picker);
+    cx.callback.push(Box::new(|editor: &mut Editor| {
+        let ls = editor
+            .layer_state
+            .downcast_mut::<crate::layers::LayerState>()
+            .expect("Editor.layer_state must be LayerState");
+        if let Some(picker) = ls.last_picker.take() {
+            ls.layers.push(picker);
         } else {
-            cx.editor.set_error("no last picker")
+            editor.set_error("no last picker")
         }
     }));
 }
@@ -3009,12 +3040,12 @@ fn select_mode(cx: &mut Context) {
     });
     doc.set_selection(view.id, selection);
 
-    cx.editor.tabs[cx.editor.active_tab].mode = Mode::Select;
+    cx.editor.tabs[cx.editor.active_tab].set_mode(Mode::Select);
 }
 
 fn exit_select_mode(cx: &mut Context) {
     if cx.editor.mode() == Mode::Select {
-        cx.editor.tabs[cx.editor.active_tab].mode = Mode::Normal;
+        cx.editor.tabs[cx.editor.active_tab].set_mode(Mode::Normal);
     }
 }
 
@@ -3466,12 +3497,12 @@ fn match_brackets(cx: &mut Context) {
 //
 
 fn jump_forward(cx: &mut Context) {
-    let focus = cx.editor.tabs[cx.editor.active_tab].tree.focus;
+    let focus = cx.editor.tabs[cx.editor.active_tab].tree().focus;
     cx.editor.jump_forward(focus, cx.count());
 }
 
 fn jump_backward(cx: &mut Context) {
-    let focus = cx.editor.tabs[cx.editor.active_tab].tree.focus;
+    let focus = cx.editor.tabs[cx.editor.active_tab].tree().focus;
     cx.editor.jump_backward(focus, cx.count());
 }
 
@@ -3540,7 +3571,7 @@ fn split(editor: &mut Editor, action: Action) {
         Action::HorizontalSplit => helix_view::tree::Layout::Horizontal,
         _ => helix_view::tree::Layout::Vertical,
     };
-    editor.tabs[editor.active_tab].tree.split(new_view, layout);
+    editor.tabs[editor.active_tab].tree_mut().split(new_view, layout);
 
     // match the selection in the new view
     let (view, doc) = current!(editor);
@@ -3567,7 +3598,7 @@ fn vsplit_new(cx: &mut Context) {
 }
 
 fn wclose(cx: &mut Context) {
-    if cx.editor.tabs[cx.editor.active_tab].tree.views().count() == 1 {
+    if cx.editor.tabs[cx.editor.active_tab].tree().views().count() == 1 {
         if let Err(err) = typed::buffers_remaining_impl(cx.editor) {
             cx.editor.set_error(err.to_string());
             return;
@@ -3582,7 +3613,7 @@ fn wonly(cx: &mut Context) {
     let views = cx
         .editor
         .tabs[cx.editor.active_tab]
-        .tree
+        .tree()
         .views()
         .map(|(v, focus)| (v.id, focus))
         .collect::<Vec<_>>();

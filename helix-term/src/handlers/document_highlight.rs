@@ -17,10 +17,10 @@ fn request_document_highlights(editor: &mut Editor, doc_id: AppId, view_id: View
         return;
     }
 
-    if editor.tabs[editor.active_tab].doc.id() != doc_id {
+    if editor.tabs[editor.active_tab].doc().id() != doc_id {
         return;
     }
-    let doc = &mut editor.tabs[editor.active_tab].doc;
+    let doc = editor.tabs[editor.active_tab].doc_mut();
 
     doc.ensure_view_init(view_id);
 
@@ -58,7 +58,7 @@ fn request_document_highlights(editor: &mut Editor, doc_id: AppId, view_id: View
             .map(|highlights| document_highlight_ranges(&text, offset_encoding, highlights))
             .unwrap_or_default();
 
-        job::dispatch(move |editor, _| {
+        job::dispatch(move |editor| {
             apply_document_highlights(editor, doc_id, view_id, ranges);
         })
         .await;
@@ -110,10 +110,10 @@ fn apply_document_highlights(
         return;
     }
 
-    if editor.tabs[editor.active_tab].doc.id() != doc_id {
+    if editor.tabs[editor.active_tab].doc().id() != doc_id {
         return;
     }
-    let doc = &mut editor.tabs[editor.active_tab].doc;
+    let doc = editor.tabs[editor.active_tab].doc_mut();
 
     if !doc.has_language_server_with_feature(LanguageServerFeature::DocumentHighlight) {
         doc.clear_document_highlights(view_id);
@@ -133,7 +133,7 @@ pub(super) fn register_hooks(_handlers: &Handlers) {
         if event.doc.config.load().lsp.auto_document_highlight {
             let doc_id = event.doc.id();
             let view_id = event.view;
-            job::dispatch_blocking(move |editor, _| {
+            job::dispatch_blocking(move |editor| {
                 request_document_highlights(editor, doc_id, view_id);
             });
         }
@@ -144,8 +144,8 @@ pub(super) fn register_hooks(_handlers: &Handlers) {
         if !event.editor.config().lsp.auto_document_highlight {
             return Ok(());
         }
-        let view_id = event.editor.tabs[event.editor.active_tab].tree.focus;
-        if event.editor.tabs[event.editor.active_tab].tree.try_get(view_id).is_none() {
+        let view_id = event.editor.tabs[event.editor.active_tab].tree().focus;
+        if event.editor.tabs[event.editor.active_tab].tree().try_get(view_id).is_none() {
             return Ok(());
         }
         request_document_highlights(event.editor, event.doc, view_id);
@@ -156,7 +156,7 @@ pub(super) fn register_hooks(_handlers: &Handlers) {
         if event.doc.config.load().lsp.auto_document_highlight && !event.ghost_transaction {
             let doc_id = event.doc.id();
             let view_id = event.view;
-            job::dispatch_blocking(move |editor, _| {
+            job::dispatch_blocking(move |editor| {
                 request_document_highlights(editor, doc_id, view_id);
             });
         }
@@ -167,8 +167,8 @@ pub(super) fn register_hooks(_handlers: &Handlers) {
         if !event.editor.config().lsp.auto_document_highlight {
             return Ok(());
         }
-        let view_id = event.editor.tabs[event.editor.active_tab].tree.focus;
-        let Some(view) = event.editor.tabs[event.editor.active_tab].tree.try_get(view_id) else {
+        let view_id = event.editor.tabs[event.editor.active_tab].tree().focus;
+        let Some(view) = event.editor.tabs[event.editor.active_tab].tree().try_get(view_id) else {
             return Ok(());
         };
         let doc_id = view.doc;
@@ -177,8 +177,8 @@ pub(super) fn register_hooks(_handlers: &Handlers) {
     });
 
     register_hook!(move |event: &mut LanguageServerExited<'_>| {
-        if event.editor.tabs[event.editor.active_tab].doc.supports_language_server(event.server_id) {
-            event.editor.tabs[event.editor.active_tab].doc.clear_all_document_highlights();
+        if event.editor.tabs[event.editor.active_tab].doc().supports_language_server(event.server_id) {
+            event.editor.tabs[event.editor.active_tab].doc_mut().clear_all_document_highlights();
         }
         Ok(())
     });
@@ -187,7 +187,7 @@ pub(super) fn register_hooks(_handlers: &Handlers) {
         if event.new.lsp.auto_document_highlight {
             return Ok(());
         }
-        event.editor.tabs[event.editor.active_tab].doc.clear_all_document_highlights();
+        event.editor.tabs[event.editor.active_tab].doc_mut().clear_all_document_highlights();
         Ok(())
     });
 }

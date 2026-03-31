@@ -18,7 +18,6 @@ mod text;
 mod text_decorations;
 pub mod welcome;
 
-use crate::compositor::Compositor;
 use crate::filter_picker_entry;
 use crate::job::{self, Callback};
 pub use app::{AppId, Application};
@@ -161,17 +160,18 @@ pub fn raw_regex_prompt(
 
                             if event == PromptEvent::Validate {
                                 let callback = async move {
-                                    let call: job::Callback = Callback::EditorCompositor(Box::new(
-                                        move |_editor: &mut Editor, compositor: &mut Compositor| {
+                                    let call: job::Callback = Callback::Editor(Box::new(
+                                        move |editor: &mut Editor| {
+                                            use crate::layers::EditorLayers;
                                             let contents = Text::new(format!("{}", err));
-                                            let size = compositor.size();
+                                            let size = editor.layer_area();
                                             let popup = Popup::new("invalid-regex", contents)
                                                 .position(Some(helix_core::Position::new(
                                                     size.height as usize - 2, // 2 = statusline + commandline
                                                     0,
                                                 )))
                                                 .auto_close(true);
-                                            compositor.replace_or_push("invalid-regex", popup);
+                                            editor.replace_or_push_layer("invalid-regex", popup);
                                         },
                                     ));
                                     Ok(call)
@@ -299,11 +299,9 @@ pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
             cx.editor.syn_loader.clone(),
         ) {
             Ok(doc) => {
-                let callback = crate::job::Callback::EditorCompositor(Box::new(
-                    move |editor: &mut Editor, compositor: &mut Compositor| {
-                        if let Some(tab_mgr) = compositor.find::<TabManager>() {
-                            tab_mgr.new_editor_tab(doc, editor);
-                        }
+                let callback = crate::job::Callback::Editor(Box::new(
+                    move |editor: &mut Editor| {
+                        TabManager::add_editor_tab(editor, doc);
                     },
                 ));
                 cx.jobs.callback(async { Ok(callback) });
@@ -397,9 +395,10 @@ pub fn file_explorer(root: PathBuf, editor: &Editor) -> Result<FileExplorer, std
                 let new_root = helix_stdx::path::normalize(path);
                 let callback = Box::pin(async move {
                     let call: Callback =
-                        Callback::EditorCompositor(Box::new(move |editor, compositor| {
+                        Callback::Editor(Box::new(move |editor| {
+                            use crate::layers::EditorLayers;
                             if let Ok(picker) = file_explorer(new_root, editor) {
-                                compositor.push(Box::new(overlay::overlaid(picker)));
+                                editor.push_layer(Box::new(overlay::overlaid(picker)));
                             }
                         }));
                     Ok(call)
@@ -414,11 +413,9 @@ pub fn file_explorer(root: PathBuf, editor: &Editor) -> Result<FileExplorer, std
                     cx.editor.syn_loader.clone(),
                 ) {
                     Ok(doc) => {
-                        let callback = crate::job::Callback::EditorCompositor(Box::new(
-                            move |editor: &mut Editor, compositor: &mut Compositor| {
-                                if let Some(tab_mgr) = compositor.find::<TabManager>() {
-                                    tab_mgr.new_editor_tab(doc, editor);
-                                }
+                        let callback = crate::job::Callback::Editor(Box::new(
+                            move |editor: &mut Editor| {
+                                TabManager::add_editor_tab(editor, doc);
                             },
                         ));
                         cx.jobs.callback(async { Ok(callback) });
@@ -515,7 +512,7 @@ pub mod completers {
     }
 
     pub fn buffer(editor: &Editor, input: &str) -> Vec<Completion> {
-        let names = std::iter::once(&editor.tabs[editor.active_tab].doc).map(|doc| {
+        let names = std::iter::once(editor.tabs[editor.active_tab].doc()).map(|doc| {
             doc.relative_path()
                 .map(|p| p.display().to_string().into())
                 .unwrap_or_else(|| Cow::from(SCRATCH_BUFFER_NAME))

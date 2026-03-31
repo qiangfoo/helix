@@ -42,10 +42,10 @@ impl WelcomePage {
                 let root = helix_core::find_workspace().0;
                 if root.exists() {
                     let callback: compositor::Callback = Box::new(
-                        move |compositor: &mut compositor::Compositor,
-                              ctx: &mut compositor::Context| {
-                            let picker = ui::file_picker(ctx.editor, root);
-                            compositor.push(Box::new(overlaid(picker)));
+                        move |editor: &mut helix_view::Editor| {
+                            use crate::layers::EditorLayers;
+                            let picker = ui::file_picker(editor, root);
+                            editor.push_layer(Box::new(overlaid(picker)));
                         },
                     );
                     EventResult::Consumed(Some(callback))
@@ -59,11 +59,11 @@ impl WelcomePage {
                 ..
             } => {
                 let callback: compositor::Callback = Box::new(
-                    move |compositor: &mut compositor::Compositor,
-                          ctx: &mut compositor::Context| {
+                    move |editor: &mut helix_view::Editor| {
+                        use crate::layers::EditorLayers;
                         let cwd = helix_stdx::env::current_working_dir();
-                        if let Ok(picker) = ui::file_explorer(cwd, ctx.editor) {
-                            compositor.push(Box::new(overlaid(picker)));
+                        if let Ok(picker) = ui::file_explorer(cwd, editor) {
+                            editor.push_layer(Box::new(overlaid(picker)));
                         }
                     },
                 );

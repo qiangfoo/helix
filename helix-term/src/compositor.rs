@@ -1,13 +1,10 @@
-// Each component declares its own size constraints and gets fitted based on its parent.
-// Q: how does this work with popups?
-// cursive does compositor.screen_mut().add_layer_at(pos::absolute(x, y), <component>)
 use helix_core::Position;
 use helix_view::graphics::{CursorKind, Rect};
 
 use tui::buffer::Buffer as Surface;
 
-pub type Callback = Box<dyn FnOnce(&mut Compositor, &mut Context)>;
-pub type SyncCallback = Box<dyn FnOnce(&mut Compositor, &mut Context) + Sync>;
+pub type Callback = Box<dyn FnOnce(&mut helix_view::Editor)>;
+pub type SyncCallback = Box<dyn FnOnce(&mut helix_view::Editor) + Sync>;
 
 // Cursive-inspired
 pub enum EventResult {
@@ -16,7 +13,6 @@ pub enum EventResult {
 }
 
 use crate::job::Jobs;
-use crate::ui::picker;
 use helix_view::Editor;
 
 pub use helix_view::input::Event;
@@ -31,7 +27,7 @@ impl Context<'_> {
     /// Waits on all pending jobs.
     /// In the read-only viewer there are no pending writes to flush.
     pub fn block_try_flush_writes(&mut self) -> anyhow::Result<()> {
-        tokio::task::block_in_place(|| helix_lsp::block_on(self.jobs.finish(self.editor, None)))?;
+        tokio::task::block_in_place(|| helix_lsp::block_on(self.jobs.finish(self.editor)))?;
         Ok(())
     }
 }
@@ -71,145 +67,6 @@ pub trait Component: Any + AnyComponent {
 
     fn id(&self) -> Option<&'static str> {
         None
-    }
-}
-
-pub struct Compositor {
-    layers: Vec<Box<dyn Component>>,
-    area: Rect,
-
-    pub(crate) last_picker: Option<Box<dyn Component>>,
-    pub(crate) full_redraw: bool,
-}
-
-impl Compositor {
-    pub fn new(area: Rect) -> Self {
-        Self {
-            layers: Vec::new(),
-            area,
-            last_picker: None,
-            full_redraw: false,
-        }
-    }
-
-    pub fn size(&self) -> Rect {
-        self.area
-    }
-
-    pub fn resize(&mut self, area: Rect) {
-        self.area = area;
-    }
-
-    /// Add a layer to be rendered in front of all existing layers.
-    pub fn push(&mut self, mut layer: Box<dyn Component>) {
-        // immediately clear last_picker field to avoid excessive memory
-        // consumption for picker with many items
-        if layer.id() == Some(picker::ID) {
-            self.last_picker = None;
-        }
-        let size = self.size();
-        // trigger required_size on init
-        layer.required_size((size.width, size.height));
-        self.layers.push(layer);
-    }
-
-    /// Replace a component that has the given `id` with the new layer and if
-    /// no component is found, push the layer normally.
-    pub fn replace_or_push<T: Component>(&mut self, id: &'static str, layer: T) {
-        if let Some(component) = self.find_id(id) {
-            *component = layer;
-        } else {
-            self.push(Box::new(layer))
-        }
-    }
-
-    pub fn pop(&mut self) -> Option<Box<dyn Component>> {
-        self.layers.pop()
-    }
-
-    pub fn remove(&mut self, id: &'static str) -> Option<Box<dyn Component>> {
-        let idx = self
-            .layers
-            .iter()
-            .position(|layer| layer.id() == Some(id))?;
-        Some(self.layers.remove(idx))
-    }
-
-    pub fn remove_type<T: 'static>(&mut self) {
-        let type_name = std::any::type_name::<T>();
-        self.layers
-            .retain(|component| component.type_name() != type_name);
-    }
-    pub fn handle_event(&mut self, event: &Event, cx: &mut Context) -> bool {
-        let mut callbacks = Vec::new();
-        let mut consumed = false;
-
-        // propagate events through the layers until we either find a layer that consumes it or we
-        // run out of layers (event bubbling), starting at the front layer and then moving to the
-        // background.
-        for layer in self.layers.iter_mut().rev() {
-            match layer.handle_event(event, cx) {
-                EventResult::Consumed(Some(callback)) => {
-                    callbacks.push(callback);
-                    consumed = true;
-                    break;
-                }
-                EventResult::Consumed(None) => {
-                    consumed = true;
-                    break;
-                }
-                EventResult::Ignored(Some(callback)) => {
-                    callbacks.push(callback);
-                }
-                EventResult::Ignored(None) => {}
-            };
-        }
-
-        for callback in callbacks {
-            callback(self, cx)
-        }
-
-        consumed
-    }
-
-    pub fn render(&mut self, area: Rect, surface: &mut Surface, cx: &mut Context) {
-        for layer in &mut self.layers {
-            layer.render(area, surface, cx);
-        }
-    }
-
-    pub fn cursor(&self, area: Rect, editor: &Editor) -> (Option<Position>, CursorKind) {
-        for layer in self.layers.iter().rev() {
-            if let (Some(pos), kind) = layer.cursor(area, editor) {
-                return (Some(pos), kind);
-            }
-        }
-        (None, CursorKind::Hidden)
-    }
-
-    pub fn has_component(&self, type_name: &str) -> bool {
-        self.layers
-            .iter()
-            .any(|component| component.type_name() == type_name)
-    }
-
-    pub fn find<T: 'static>(&mut self) -> Option<&mut T> {
-        let type_name = std::any::type_name::<T>();
-        self.layers
-            .iter_mut()
-            .find(|component| component.type_name() == type_name)
-            .and_then(|component| component.as_any_mut().downcast_mut())
-    }
-
-    pub fn find_id<T: 'static>(&mut self, id: &'static str) -> Option<&mut T> {
-        self.layers
-            .iter_mut()
-            .find(|component| component.id() == Some(id))
-            .and_then(|component| component.as_any_mut().downcast_mut())
-    }
-
-    pub fn need_full_redraw(&mut self) {
-        self.full_redraw = true;
     }
 }
 

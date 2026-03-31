@@ -1,5 +1,5 @@
 use crate::{
-    compositor::{Callback, Component, Compositor, Context, Event, EventResult},
+    compositor::{Callback, Component, Context, Event, EventResult},
     ctrl, key, shift,
 };
 use tui::{buffer::Buffer as Surface, widgets::Table};
@@ -238,9 +238,10 @@ impl<T: Item + 'static> Component for Menu<T> {
             _ => return EventResult::Ignored(None),
         };
 
-        let close_fn: Option<Callback> = Some(Box::new(|compositor: &mut Compositor, _| {
+        let close_fn: Option<Callback> = Some(Box::new(|editor: &mut Editor| {
+            use crate::layers::EditorLayers;
             // remove the layer
-            compositor.pop();
+            editor.pop_layer();
         }));
 
         match event {

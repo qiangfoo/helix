@@ -20,10 +20,11 @@ use tui::backend::Backend;
 
 use crate::{
     args::Args,
-    compositor::{Compositor, Event},
+    compositor::Event,
     config::Config,
     handlers,
     job::Jobs,
+    layers::EditorLayers,
     ui::{self, overlay::overlaid},
 };
 
@@ -66,7 +67,6 @@ type TerminalEvent = crossterm::event::Event;
 type Terminal = tui::terminal::Terminal<TerminalBackend>;
 
 pub struct Application {
-    compositor: Compositor,
     terminal: Terminal,
     pub editor: Editor,
 
@@ -123,7 +123,6 @@ impl Application {
         let theme_mode = backend.get_theme_mode();
         let mut terminal = Terminal::new(backend)?;
         let area = terminal.size();
-        let mut compositor = Compositor::new(area);
         let config = Arc::new(ArcSwap::from_pointee(config));
         let handlers = handlers::setup(config.clone());
         let mut editor = Editor::new(
@@ -137,9 +136,10 @@ impl Application {
         );
         Self::load_configured_theme(&mut editor, &config.load(), &mut terminal, theme_mode);
 
+        editor.init_layers(area);
         let tab_manager = ui::TabManager::new(Arc::clone(&config));
         // Initial tab will be created after files are opened below.
-        compositor.push(Box::new(tab_manager));
+        editor.push_layer(Box::new(tab_manager));
 
         let jobs = Jobs::new();
 
@@ -223,22 +223,21 @@ impl Application {
         }
 
         // Add all documents as tabs
-        {
-            let tab_manager = compositor.find::<ui::TabManager>().unwrap();
-            for doc in docs_to_open {
-                tab_manager.new_editor_tab(doc, &mut editor);
-            }
-            if tab_manager.tab_count() > 0 {
-                tab_manager.activate_tab(0);
-                editor.active_tab = 0;
-            } else {
-                tab_manager.ensure_welcome_tab();
-            }
+        for doc in docs_to_open {
+            ui::TabManager::add_editor_tab(&mut editor, doc);
+        }
+        if editor.tab_count() > 0 {
+            let tm = editor.find_layer::<ui::TabManager>().unwrap();
+            tm.activate_tab(0);
+            editor.active_tab = 0;
+        } else {
+            let tm = editor.find_layer::<ui::TabManager>().unwrap();
+            tm.ensure_welcome_tab();
         }
 
         // Push the picker on top if needed
         if let Some(picker) = picker_to_push {
-            compositor.push(picker);
+            editor.push_layer(picker);
         }
 
         #[cfg(windows)]
@@ -254,7 +253,6 @@ impl Application {
         .context("build signal handler")?;
 
         let app = Self {
-            compositor,
             terminal,
             editor,
             config,
@@ -268,19 +266,17 @@ impl Application {
     }
 
     async fn render(&mut self) {
-        if self.compositor.full_redraw {
-            self.terminal.clear().expect("Cannot clear the terminal");
-            self.compositor.full_redraw = false;
+        {
+            use crate::layers::LayerState;
+            let ls = self.editor.layer_state.downcast_mut::<LayerState>().unwrap();
+            if ls.full_redraw {
+                self.terminal.clear().expect("Cannot clear the terminal");
+                ls.full_redraw = false;
+            }
         }
 
-        let mut cx = crate::compositor::Context {
-            editor: &mut self.editor,
-            jobs: &mut self.jobs,
-            scroll: None,
-        };
-
         helix_event::start_frame();
-        cx.editor.needs_redraw = false;
+        self.editor.needs_redraw = false;
 
         let area = self
             .terminal
@@ -291,11 +287,11 @@ impl Application {
 
         let surface = self.terminal.current_buffer_mut();
 
-        self.compositor.render(area, surface, &mut cx);
-        let (pos, kind) = self.compositor.cursor(area, &self.editor);
+        self.editor.render_layers(area, surface, &mut self.jobs);
+        let (pos, kind) = self.editor.layer_cursor(area);
         // reset cursor cache
         if let Some(dv) = self.editor.tabs.get_mut(self.editor.active_tab) {
-            dv.cursor_cache.reset();
+            dv.cursor_cache().reset();
         }
 
         let pos = pos.map(|pos| (pos.col as u16, pos.row as u16));
@@ -338,7 +334,7 @@ impl Application {
                     self.handle_terminal_events(event).await;
                 }
                 Some(callback) = self.jobs.callbacks.recv() => {
-                    self.jobs.handle_callback(&mut self.editor, &mut self.compositor, Ok(Some(callback)));
+                    self.jobs.handle_callback(&mut self.editor, Ok(Some(callback)));
                     self.render().await;
                 }
                 Some(msg) = self.jobs.status_messages.recv() => {
@@ -353,7 +349,7 @@ impl Application {
                     helix_event::request_redraw();
                 }
                 Some(callback) = self.jobs.wait_futures.next() => {
-                    self.jobs.handle_callback(&mut self.editor, &mut self.compositor, callback);
+                    self.jobs.handle_callback(&mut self.editor, callback);
                     self.render().await;
                 }
                 event = self.editor.wait_event() => {
@@ -412,9 +408,9 @@ impl Application {
         // reset view position in case softwrap was enabled/disabled
         let scrolloff = self.editor.config().scrolloff;
         {
-            let dv = &mut self.editor.tabs[self.editor.active_tab];
-            for (view, _) in dv.tree.views() {
-                view.ensure_cursor_in_view(&mut dv.doc, scrolloff);
+            let (doc, tree) = self.editor.tabs[self.editor.active_tab].doc_and_tree_mut();
+            for (view, _) in tree.views() {
+                view.ensure_cursor_in_view(doc, scrolloff);
             }
         }
     }
@@ -439,7 +435,7 @@ impl Application {
             // Re-parse the open document with the new language config.
             {
                 let lang_loader = self.editor.syn_loader.load();
-                let document = &mut self.editor.tabs[self.editor.active_tab].doc;
+                let document = self.editor.tabs[self.editor.active_tab].doc_mut();
                 // Re-detect .editorconfig
                 document.detect_editor_config();
                 document.detect_language(&lang_loader);
@@ -564,7 +560,7 @@ impl Application {
 
                 // redraw the terminal
                 let area = self.terminal.size();
-                self.compositor.resize(area);
+                self.editor.resize_layers(area);
                 self.terminal.clear().expect("couldn't clear terminal");
 
                 self.render().await;
@@ -584,12 +580,7 @@ impl Application {
     }
 
     pub async fn handle_idle_timeout(&mut self) {
-        let mut cx = crate::compositor::Context {
-            editor: &mut self.editor,
-            jobs: &mut self.jobs,
-            scroll: None,
-        };
-        let should_render = self.compositor.handle_event(&Event::IdleTimeout, &mut cx);
+        let should_render = self.editor.handle_layer_event(&Event::IdleTimeout, &mut self.jobs);
         if should_render || self.editor.needs_redraw {
             self.render().await;
         }
@@ -633,11 +624,6 @@ impl Application {
         #[cfg(not(windows))]
         use termina::escape::csi;
 
-        let mut cx = crate::compositor::Context {
-            editor: &mut self.editor,
-            jobs: &mut self.jobs,
-            scroll: None,
-        };
         // Handle key events
         let should_redraw = match event.unwrap() {
             #[cfg(not(windows))]
@@ -648,10 +634,10 @@ impl Application {
 
                 let area = self.terminal.size();
 
-                self.compositor.resize(area);
+                self.editor.resize_layers(area);
 
-                self.compositor
-                    .handle_event(&Event::Resize(cols, rows), &mut cx)
+                self.editor
+                    .handle_layer_event(&Event::Resize(cols, rows), &mut self.jobs)
             }
             #[cfg(not(windows))]
             // Ignore keyboard release events.
@@ -678,10 +664,10 @@ impl Application {
 
                 let area = self.terminal.size();
 
-                self.compositor.resize(area);
+                self.editor.resize_layers(area);
 
-                self.compositor
-                    .handle_event(&Event::Resize(width, height), &mut cx)
+                self.editor
+                    .handle_layer_event(&Event::Resize(width, height), &mut self.jobs)
             }
             #[cfg(windows)]
             // Ignore keyboard release events.
@@ -689,8 +675,17 @@ impl Application {
                 kind: crossterm::event::KeyEventKind::Release,
                 ..
             }) => false,
-            event => self.compositor.handle_event(&event.into(), &mut cx),
+            event => self.editor.handle_layer_event(&event.into(), &mut self.jobs),
         };
+
+        // Drain any pending macro keys queued by callbacks
+        {
+            let keys = self.editor.drain_pending_keys();
+            for key in keys {
+                self.editor
+                    .handle_layer_event(&Event::Key(key.into()), &mut self.jobs);
+            }
+        }
 
         if should_redraw && !self.editor.should_close() {
             self.render().await;
@@ -781,16 +776,9 @@ impl Application {
                     }
                     Notification::ProgressMessage(params)
                         if !self
-                            .compositor
-                            .has_component(std::any::type_name::<ui::Prompt>()) =>
+                            .editor
+                            .has_layer(std::any::type_name::<ui::Prompt>()) =>
                     {
-                        let tab_manager = self
-                            .compositor
-                            .find::<ui::TabManager>()
-                            .expect("expected TabManager");
-                        let editor_view = tab_manager
-                            .editor_view()
-                            .expect("expected at least one EditorView");
                         let lsp::ProgressParams {
                             token,
                             value: lsp::ProgressParamsValue::WorkDone(work),
@@ -813,7 +801,9 @@ impl Application {
                                 } else {
                                     self.lsp_progress.end_progress(server_id, &token);
                                     if !self.lsp_progress.is_progressing(server_id) {
-                                        editor_view.spinners_mut().get_or_create(server_id).stop();
+                                        let tm = self.editor.find_layer::<ui::TabManager>().expect("expected TabManager");
+                                        let ev = tm.editor_view().expect("expected at least one EditorView");
+                                        ev.spinners_mut().get_or_create(server_id).stop();
                                     }
                                     self.editor.clear_status();
 
@@ -857,7 +847,9 @@ impl Application {
                             lsp::WorkDoneProgress::End(_) => {
                                 self.lsp_progress.end_progress(server_id, &token);
                                 if !self.lsp_progress.is_progressing(server_id) {
-                                    editor_view.spinners_mut().get_or_create(server_id).stop();
+                                    let tm = self.editor.find_layer::<ui::TabManager>().expect("expected TabManager");
+                                    let ev = tm.editor_view().expect("expected at least one EditorView");
+                                    ev.spinners_mut().get_or_create(server_id).stop();
                                 };
                             }
                         }
@@ -880,7 +872,7 @@ impl Application {
                         self.editor.diagnostics.retain(|_, diags| !diags.is_empty());
 
                         // Clear any diagnostics for the document with this server open.
-                        self.editor.tabs[self.editor.active_tab].doc.clear_diagnostics_for_language_server(server_id);
+                        self.editor.tabs[self.editor.active_tab].doc_mut().clear_diagnostics_for_language_server(server_id);
 
                         helix_event::dispatch(helix_view::events::LanguageServerExited {
                             editor: &mut self.editor,
@@ -924,8 +916,8 @@ impl Application {
                         self.lsp_progress.create(server_id, params.token);
 
                         let tab_manager = self
-                            .compositor
-                            .find::<ui::TabManager>()
+                            .editor
+                            .find_layer::<ui::TabManager>()
                             .expect("expected TabManager");
                         let editor_view = tab_manager
                             .editor_view()
@@ -1049,8 +1041,8 @@ impl Application {
                     Ok(MethodCall::WorkspaceDiagnosticRefresh) => {
                         let language_server = language_server!().id();
 
-                        if self.editor.tabs[self.editor.active_tab].doc.supports_language_server(language_server) {
-                            let doc_id = self.editor.tabs[self.editor.active_tab].doc.id();
+                        if self.editor.tabs[self.editor.active_tab].doc().supports_language_server(language_server) {
+                            let doc_id = self.editor.tabs[self.editor.active_tab].doc().id();
                             handlers::diagnostics::request_document_diagnostics(
                                 &mut self.editor,
                                 doc_id,
@@ -1086,8 +1078,8 @@ impl Application {
                                     }
                                 },
                             );
-                            self.compositor
-                                .replace_or_push("lsp-show-message-request", select);
+                            self.editor
+                                .replace_or_push_layer("lsp-show-message-request", select);
                             // Avoid sending a reply. The `Select` callback above sends the reply.
                             return;
                         } else {
@@ -1166,11 +1158,7 @@ impl Application {
         };
 
         // Add the document as a new tab
-        let tab_manager = self
-            .compositor
-            .find::<ui::TabManager>()
-            .expect("expected TabManager");
-        tab_manager.new_editor_tab(doc, &mut self.editor);
+        ui::TabManager::add_editor_tab(&mut self.editor, doc);
 
         if let Some(range) = selection {
             let (view, doc) = current!(self.editor);
@@ -1264,7 +1252,7 @@ impl Application {
 
         if let Err(err) = self
             .jobs
-            .finish(&mut self.editor, Some(&mut self.compositor))
+            .finish(&mut self.editor)
             .await
         {
             log::error!("Error executing job: {}", err);
