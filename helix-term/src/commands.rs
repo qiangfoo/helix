@@ -2873,14 +2873,8 @@ pub fn command_palette(cx: &mut Context) {
 
                 if ctx.editor.tabs[ctx.editor.active_tab].tree().contains(focus) {
                     let config = ctx.editor.config();
-                    let mode = ctx.editor.mode();
                     let (view, doc) = current!(ctx.editor);
-
                     view.ensure_cursor_in_view(doc, config.scrolloff);
-
-                    if mode != Mode::Normal {
-                        doc.append_changes_to_history(view);
-                    }
                 }
             });
             editor.push_layer(Box::new(overlaid(picker)));
@@ -2918,8 +2912,7 @@ pub enum Open {
 // o inserts a new line after each line with a selection
 // O inserts a new line before each line with a selection
 // Store a jump on the jumplist.
-fn push_jump(view: &mut View, doc: &mut Document) {
-    doc.append_changes_to_history(view);
+fn push_jump(view: &mut View, doc: &Document) {
     let jump = (doc.id(), doc.selection(view.id).clone());
     view.jumps.push(jump);
 }

@@ -13,27 +13,25 @@ use helix_vcs::{DiffHandle, DiffProviderRegistry};
 use once_cell::sync::OnceCell;
 use thiserror;
 
-use ::parking_lot::Mutex;
 use serde::de::{self, Deserialize, Deserializer};
 use serde::Serialize;
 use std::borrow::Cow;
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use helix_core::{
     editor_config::EditorConfig,
     encoding,
-    history::{History, State},
+    history::History,
     indent::{auto_detect_indent_style, IndentStyle},
     line_ending::auto_detect_line_ending,
     syntax::{self, config::LanguageConfiguration},
-    ChangeSet, Diagnostic, LineEnding, Range, Rope, RopeBuilder, Selection, Syntax, Transaction,
+    Diagnostic, LineEnding, Range, Rope, RopeBuilder, Selection, Syntax, Transaction,
 };
 
 use crate::{
@@ -99,12 +97,6 @@ impl Serialize for Mode {
         serializer.collect_str(self)
     }
 }
-#[derive(Debug)]
-pub struct SavePoint {
-    /// The view this savepoint is associated with
-    pub view: ViewId,
-    revert: Mutex<Transaction>,
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum DocumentOpenError {
@@ -157,24 +149,14 @@ pub struct Document {
     /// Corresponding language scope name. Usually `source.<lang>`.
     pub language: Option<Arc<LanguageConfiguration>>,
 
-    /// Pending changes since last history commit.
-    changes: ChangeSet,
-    /// State at last commit. Used for calculating reverts.
-    old_state: Option<State>,
-    /// Undo tree.
-    // It can be used as a cell where we will take it out to get some parts of the history and put
-    // it back as it separated from the edits. We could split out the parts manually but that will
-    // be more troublesome.
-    pub history: Cell<History>,
+    /// Linear history of transactions for view synchronization.
+    pub history: History,
     pub config: Arc<dyn DynAccess<Config> + Send + Sync>,
-
-    savepoints: Vec<Weak<SavePoint>>,
 
     // Last time we wrote to the file. This will carry the time the file was last opened if there
     // were no saves.
     last_saved_time: SystemTime,
 
-    last_saved_revision: usize,
     version: i32, // should be usize?
     pub(crate) modified_since_accessed: bool,
 
@@ -302,7 +284,7 @@ pub struct DocumentInlayHintsId {
     pub last_line: usize,
 }
 
-use std::{fmt, mem};
+use std::fmt;
 impl fmt::Debug for Document {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Document")
@@ -317,11 +299,7 @@ impl fmt::Debug for Document {
             .field("restore_cursor", &self.restore_cursor)
             .field("syntax", &self.syntax)
             .field("language", &self.language)
-            .field("changes", &self.changes)
-            .field("old_state", &self.old_state)
-            // .field("history", &self.history)
             .field("last_saved_time", &self.last_saved_time)
-            .field("last_saved_revision", &self.last_saved_revision)
             .field("version", &self.version)
             .field("modified_since_accessed", &self.modified_since_accessed)
             .field("diagnostics", &self.diagnostics)
@@ -510,14 +488,6 @@ fn read_and_detect_encoding<R: std::io::Read + ?Sized>(
     Ok((encoding, has_bom, decoder, read))
 }
 
-fn take_with<T, F>(mut_ref: &mut T, f: F)
-where
-    T: Default,
-    F: FnOnce(T) -> T,
-{
-    *mut_ref = f(mem::take(mut_ref));
-}
-
 use helix_lsp::{lsp, Client, LanguageServerId, LanguageServerName};
 use url::Url;
 
@@ -530,8 +500,6 @@ impl Document {
     ) -> Self {
         let encoding = encoding.unwrap_or(encoding::UTF_8);
         let line_ending = config.load().default_line_ending.into();
-        let changes = ChangeSet::new(text.slice(..));
-        let old_state = None;
 
         Self {
             id: AppId::default(),
@@ -549,14 +517,10 @@ impl Document {
             restore_cursor: false,
             syntax: None,
             language: None,
-            changes,
-            old_state,
             diagnostics: Vec::new(),
             version: 0,
-            history: Cell::new(History::default()),
-            savepoints: Vec::new(),
+            history: History::default(),
             last_saved_time: SystemTime::now(),
-            last_saved_revision: 0,
             modified_since_accessed: false,
             language_servers: HashMap::new(),
             diff_handle: None,
@@ -734,7 +698,7 @@ impl Document {
         // of the encoding.
         let transaction = helix_core::diff::compare_ropes(self.text(), &rope);
         self.apply(&transaction, view.id);
-        self.append_changes_to_history(view);
+        view.apply(&transaction, self);
         self.pickup_last_saved_time();
         self.detect_indent_and_line_ending();
 
@@ -924,21 +888,6 @@ impl Document {
                 .map_pos(view_data.view_position.anchor, Assoc::Before);
         }
 
-        // generate revert to savepoint
-        if !self.savepoints.is_empty() {
-            let revert = transaction.invert(&old_doc);
-            self.savepoints
-                .retain_mut(|save_point| match save_point.upgrade() {
-                    Some(savepoint) => {
-                        let mut revert_to_savepoint = savepoint.revert.lock();
-                        *revert_to_savepoint =
-                            revert.clone().compose(mem::take(&mut revert_to_savepoint));
-                        true
-                    }
-                    None => false,
-                })
-        }
-
         // update tree-sitter syntax tree
         if let Some(syntax) = &mut self.syntax {
             let loader = self.syn_loader.load();
@@ -1071,147 +1020,22 @@ impl Document {
         true
     }
 
-    fn apply_inner(
-        &mut self,
-        transaction: &Transaction,
-        view_id: ViewId,
-        emit_lsp_notification: bool,
-    ) -> bool {
-        // store the state just before any changes are made. This allows us to undo to the
-        // state just before a transaction was applied.
-        if self.changes.is_empty() && !transaction.changes().is_empty() {
-            self.old_state = Some(State {
-                doc: self.text.clone(),
-                selection: self.selection(view_id).clone(),
-            });
-        }
-
-        let success = self.apply_impl(transaction, view_id, emit_lsp_notification);
-
-        if !transaction.changes().is_empty() {
-            // Compose this transaction with the previous one
-            take_with(&mut self.changes, |changes| {
-                changes.compose(transaction.changes().clone())
-            });
-        }
-        success
-    }
     /// Apply a [`Transaction`] to the [`Document`] to change its text.
     pub fn apply(&mut self, transaction: &Transaction, view_id: ViewId) -> bool {
-        self.apply_inner(transaction, view_id, true)
-    }
-
-    /// Apply a [`Transaction`] to the [`Document`] to change its text
-    /// without notifying the language servers. This is useful for temporary transactions
-    /// that must not influence the server.
-    pub fn apply_temporary(&mut self, transaction: &Transaction, view_id: ViewId) -> bool {
-        self.apply_inner(transaction, view_id, false)
-    }
-
-    /// Creates a reference counted snapshot (called savpepoint) of the document.
-    ///
-    /// The snapshot will remain valid (and updated) idenfinitly as long as ereferences to it exist.
-    /// Restoring the snapshot will restore the selection and the contents of the document to
-    /// the state it had when this function was called.
-    pub fn savepoint(&mut self, view: &View) -> Arc<SavePoint> {
-        let revert = Transaction::new(self.text()).with_selection(self.selection(view.id).clone());
-        // check if there is already an existing (identical) savepoint around
-        if let Some(savepoint) = self
-            .savepoints
-            .iter()
-            .rev()
-            .find_map(|savepoint| savepoint.upgrade())
-        {
-            let transaction = savepoint.revert.lock();
-            if savepoint.view == view.id
-                && transaction.changes().is_empty()
-                && transaction.selection() == revert.selection()
-            {
-                drop(transaction);
-                return savepoint;
-            }
+        let success = self.apply_impl(transaction, view_id, true);
+        if success && !transaction.changes().is_empty() {
+            self.history.commit_changeset(transaction.clone());
         }
-        let savepoint = Arc::new(SavePoint {
-            view: view.id,
-            revert: Mutex::new(revert),
-        });
-        self.savepoints.push(Arc::downgrade(&savepoint));
-        savepoint
-    }
-
-    pub fn restore(&mut self, view: &mut View, savepoint: &SavePoint, emit_lsp_notification: bool) {
-        assert_eq!(
-            savepoint.view, view.id,
-            "Savepoint must not be used with a different view!"
-        );
-        // search and remove savepoint using a ptr comparison
-        // this avoids a deadlock as we need to lock the mutex
-        let savepoint_idx = self
-            .savepoints
-            .iter()
-            .position(|savepoint_ref| std::ptr::eq(savepoint_ref.as_ptr(), savepoint))
-            .expect("Savepoint must belong to this document");
-
-        let savepoint_ref = self.savepoints.remove(savepoint_idx);
-        let mut revert = savepoint.revert.lock();
-        self.apply_inner(&revert, view.id, emit_lsp_notification);
-        *revert = Transaction::new(self.text()).with_selection(self.selection(view.id).clone());
-        self.savepoints.push(savepoint_ref)
-    }
-
-    /// Commit pending changes to history
-    pub fn append_changes_to_history(&mut self, view: &mut View) {
-        if self.changes.is_empty() {
-            return;
-        }
-
-        let new_changeset = ChangeSet::new(self.text().slice(..));
-        let changes = std::mem::replace(&mut self.changes, new_changeset);
-        // Instead of doing this messy merge we could always commit, and based on transaction
-        // annotations either add a new layer or compose into the previous one.
-        let transaction =
-            Transaction::from(changes).with_selection(self.selection(view.id).clone());
-
-        // HAXX: we need to reconstruct the state as it was before the changes..
-        let old_state = self.old_state.take().expect("no old_state available");
-
-        let mut history = self.history.take();
-        history.commit_revision(&transaction, &old_state);
-        self.history.set(history);
-
-        // Update jumplist entries in the view.
-        view.apply(&transaction, self);
+        success
     }
 
     pub fn id(&self) -> AppId {
         self.id
     }
 
-    /// If there are unsaved modifications.
-
-    /// Set the document's latest saved revision to the given one.
-    pub fn set_last_saved_revision(&mut self, rev: usize, save_time: SystemTime) {
-        log::debug!(
-            "doc {} revision updated {} -> {}",
-            self.id,
-            self.last_saved_revision,
-            rev
-        );
-        self.last_saved_revision = rev;
-        self.last_saved_time = save_time;
-    }
-
-    /// Get the document's latest saved revision.
-    pub fn get_last_saved_revision(&mut self) -> usize {
-        self.last_saved_revision
-    }
-
     /// Get the current revision number
-    pub fn get_current_revision(&mut self) -> usize {
-        let history = self.history.take();
-        let current_revision = history.current_revision();
-        self.history.set(history);
-        current_revision
+    pub fn get_current_revision(&self) -> usize {
+        self.history.current_revision()
     }
 
     /// Corresponding language scope name. Usually `source.<lang>`.
@@ -1360,10 +1184,6 @@ impl Document {
         self.editor_config
             .trim_trailing_whitespace
             .unwrap_or_else(|| self.config.load().trim_trailing_whitespace)
-    }
-
-    pub fn changes(&self) -> &ChangeSet {
-        &self.changes
     }
 
     #[inline]

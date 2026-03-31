@@ -109,14 +109,13 @@ impl Editor {
             }
         }
 
-        // Need to determine a view for apply/append_changes_to_history
         let view_id = self.get_synced_view_id(doc_id);
         let (doc, tree) = self.tabs[self.active_tab].doc_and_tree_mut();
 
         let transaction = generate_transaction_from_edits(doc.text(), text_edits, offset_encoding);
         let view = tree.get_mut(view_id);
         doc.apply(&transaction, view.id);
-        doc.append_changes_to_history(view);
+        view.apply(&transaction, doc);
         Ok(())
     }
 

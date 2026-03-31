@@ -8,3 +8,4 @@ All buffers are read-only. Write/save commands, force-quit variants, undo/redo, 
 
 - Use `gix` (gitoxide) whenever possible to interact with git instead of running git commands. The `helix-vcs` crate already depends on `gix`.
 - The release binary must compile with **zero warnings**. After any code changes, check for and resolve unused imports, dead code, and unused variables before committing. Use `HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1 cargo build --release` to verify.
+- At the end of each task, make sure all the test failures are resolved. Run `HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1 cargo test -p helix-term --features integration --test integration` to verify.

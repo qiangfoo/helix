@@ -658,19 +658,19 @@ impl View {
     // }
 
     /// Applies a [`Transaction`] to the view.
-    pub fn apply(&mut self, transaction: &Transaction, doc: &mut Document) {
+    pub fn apply(&mut self, transaction: &Transaction, doc: &Document) {
         self.jumps.apply(transaction, doc);
         self.doc_revisions
             .insert(doc.id(), doc.get_current_revision());
     }
 
-    pub fn sync_changes(&mut self, doc: &mut Document) {
+    pub fn sync_changes(&mut self, doc: &Document) {
         if let Some(transaction) = self.changes_to_sync(doc) {
             self.apply(&transaction, doc);
         }
     }
 
-    pub(crate) fn changes_to_sync(&mut self, doc: &mut Document) -> Option<Transaction> {
+    pub(crate) fn changes_to_sync(&mut self, doc: &Document) -> Option<Transaction> {
         let latest_revision = doc.get_current_revision();
         let current_revision = *self
             .doc_revisions
@@ -681,7 +681,7 @@ impl View {
             return None;
         }
 
-        doc.history.get_mut().changes_since(current_revision)
+        doc.history.changes_since(current_revision)
     }
 }
 

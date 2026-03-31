@@ -1607,15 +1607,8 @@ impl Editor {
             return;
         }
 
-        // Reset mode to normal and ensure any pending changes are committed in the old document.
+        // Reset mode to normal.
         self.enter_normal_mode();
-        {
-            let tab = &mut self.tabs[self.active_tab];
-            let focus = tab.tree().focus;
-            let (doc, tree) = tab.doc_and_tree_mut();
-            let view = tree.get_mut(focus);
-            doc.append_changes_to_history(view);
-        }
         self.ensure_cursor_in_view(view_id);
         // Update jumplist selections with new document changes.
         {
@@ -1819,8 +1812,6 @@ impl Editor {
         self.tabs[self.active_tab].set_mode(Mode::Normal);
         let (view, doc) = current!(self);
 
-        try_restore_indent(doc, view);
-
         // if leaving append mode, move cursor back by 1
         if doc.restore_cursor {
             let text = doc.text().slice(..);
@@ -1907,43 +1898,6 @@ impl Editor {
         let view = tree.get_mut(focus);
         doc.set_selection(view_id, selection);
         view.ensure_cursor_in_view_center(doc, self.config.load().scrolloff);
-    }
-}
-
-fn try_restore_indent(doc: &mut Document, view: &mut View) {
-    use helix_core::{
-        chars::char_is_whitespace,
-        line_ending::{line_end_char_index, str_is_line_ending},
-        unicode::segmentation::UnicodeSegmentation,
-        Operation, Transaction,
-    };
-
-    fn inserted_a_new_blank_line(changes: &[Operation], pos: usize, line_end_pos: usize) -> bool {
-        if let [Operation::Retain(move_pos), Operation::Insert(ref inserted_str), Operation::Retain(_)] =
-            changes
-        {
-            let mut graphemes = inserted_str.graphemes(true);
-            move_pos + inserted_str.len() == pos
-                && graphemes.next().is_some_and(str_is_line_ending)
-                && graphemes.all(|g| g.chars().all(char_is_whitespace))
-                && pos == line_end_pos // ensure no characters exists after current position
-        } else {
-            false
-        }
-    }
-
-    let doc_changes = doc.changes().changes();
-    let text = doc.text().slice(..);
-    let range = doc.selection(view.id).primary();
-    let pos = range.cursor(text);
-    let line_end_pos = line_end_char_index(&text, range.cursor_line(text));
-
-    if inserted_a_new_blank_line(doc_changes, pos, line_end_pos) {
-        // Removes tailing whitespaces for the primary selection only, preserving existing behavior
-        let line_start_pos = text.line_to_char(range.cursor_line(text));
-        let transaction =
-            Transaction::change(doc.text(), [(line_start_pos, pos, None)].into_iter());
-        doc.apply(&transaction, view.id);
     }
 }
 
