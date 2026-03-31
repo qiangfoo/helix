@@ -1,10 +1,7 @@
 use anyhow::{anyhow, bail, Error};
 use arc_swap::access::DynAccess;
 use arc_swap::ArcSwap;
-use futures_util::future::BoxFuture;
-use futures_util::FutureExt;
 use helix_core::chars::char_is_word;
-use helix_core::command_line::Token;
 use helix_core::diagnostic::DiagnosticProvider;
 use helix_core::doc_formatter::TextFormat;
 use helix_core::encoding::Encoding;
@@ -12,7 +9,6 @@ use helix_core::syntax::config::LanguageServerFeature;
 use helix_core::text_annotations::{InlineAnnotation, Overlay};
 use helix_event::TaskController;
 use helix_lsp::util::lsp_pos_to_pos;
-use helix_stdx::faccess::{copy_metadata, readonly};
 use helix_vcs::{DiffHandle, DiffProviderRegistry};
 use once_cell::sync::OnceCell;
 use thiserror;
@@ -24,7 +20,6 @@ use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt::Display;
-use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -44,7 +39,6 @@ use helix_core::{
 use crate::{
     editor::Config,
     events::{DocumentDidChange, SelectionDidChange},
-    expansion,
     view::ViewPosition,
     AppId, Editor, Theme, View, ViewId,
 };
@@ -105,19 +99,6 @@ impl Serialize for Mode {
         serializer.collect_str(self)
     }
 }
-/// A snapshot of the text of a document that we want to write out to disk
-#[derive(Debug, Clone)]
-pub struct DocumentSavedEvent {
-    pub revision: usize,
-    pub save_time: SystemTime,
-    pub doc_id: AppId,
-    pub path: PathBuf,
-    pub text: Rope,
-}
-
-pub type DocumentSavedEventResult = Result<DocumentSavedEvent, anyhow::Error>;
-pub type DocumentSavedEventFuture = BoxFuture<'static, DocumentSavedEventResult>;
-
 #[derive(Debug)]
 pub struct SavePoint {
     /// The view this savepoint is associated with
@@ -162,7 +143,6 @@ pub struct Document {
     path: Option<PathBuf>,
     relative_path: OnceCell<Option<PathBuf>>,
     encoding: &'static encoding::Encoding,
-    has_bom: bool,
 
     pub restore_cursor: bool,
 
@@ -365,97 +345,6 @@ impl Editor {
     }
 }
 
-enum Encoder {
-    Utf16Be,
-    Utf16Le,
-    EncodingRs(encoding::Encoder),
-}
-
-impl Encoder {
-    fn from_encoding(encoding: &'static encoding::Encoding) -> Self {
-        if encoding == encoding::UTF_16BE {
-            Self::Utf16Be
-        } else if encoding == encoding::UTF_16LE {
-            Self::Utf16Le
-        } else {
-            Self::EncodingRs(encoding.new_encoder())
-        }
-    }
-
-    fn encode_from_utf8(
-        &mut self,
-        src: &str,
-        dst: &mut [u8],
-        is_empty: bool,
-    ) -> (encoding::CoderResult, usize, usize) {
-        if src.is_empty() {
-            return (encoding::CoderResult::InputEmpty, 0, 0);
-        }
-        let mut write_to_buf = |convert: fn(u16) -> [u8; 2]| {
-            let to_write = src.char_indices().map(|(indice, char)| {
-                let mut encoded: [u16; 2] = [0, 0];
-                (
-                    indice,
-                    char.encode_utf16(&mut encoded)
-                        .iter_mut()
-                        .flat_map(|char| convert(*char))
-                        .collect::<Vec<u8>>(),
-                )
-            });
-
-            let mut total_written = 0usize;
-
-            for (indice, utf16_bytes) in to_write {
-                let character_size = utf16_bytes.len();
-
-                if dst.len() <= (total_written + character_size) {
-                    return (encoding::CoderResult::OutputFull, indice, total_written);
-                }
-
-                for character in utf16_bytes {
-                    dst[total_written] = character;
-                    total_written += 1;
-                }
-            }
-
-            (encoding::CoderResult::InputEmpty, src.len(), total_written)
-        };
-
-        match self {
-            Self::Utf16Be => write_to_buf(u16::to_be_bytes),
-            Self::Utf16Le => write_to_buf(u16::to_le_bytes),
-            Self::EncodingRs(encoder) => {
-                let (code_result, read, written, ..) = encoder.encode_from_utf8(src, dst, is_empty);
-
-                (code_result, read, written)
-            }
-        }
-    }
-}
-
-// Apply BOM if encoding permit it, return the number of bytes written at the start of buf
-fn apply_bom(encoding: &'static encoding::Encoding, buf: &mut [u8; BUF_SIZE]) -> usize {
-    if encoding == encoding::UTF_8 {
-        buf[0] = 0xef;
-        buf[1] = 0xbb;
-        buf[2] = 0xbf;
-        3
-    } else if encoding == encoding::UTF_16BE {
-        buf[0] = 0xfe;
-        buf[1] = 0xff;
-        2
-    } else if encoding == encoding::UTF_16LE {
-        buf[0] = 0xff;
-        buf[1] = 0xfe;
-        2
-    } else {
-        0
-    }
-}
-
-// The documentation and implementation of this function should be up-to-date with
-// its sibling function, `to_writer()`.
-//
 /// Decodes a stream of bytes into UTF-8, returning a `Rope` and the
 /// encoding it was decoded as with BOM information. The optional `encoding`
 /// parameter can be used to override encoding auto-detection.
@@ -621,83 +510,6 @@ fn read_and_detect_encoding<R: std::io::Read + ?Sized>(
     Ok((encoding, has_bom, decoder, read))
 }
 
-// The documentation and implementation of this function should be up-to-date with
-// its sibling function, `from_reader()`.
-//
-/// Encodes the text inside `rope` into the given `encoding` and writes the
-/// encoded output into `writer.` As a `Rope` can only contain valid UTF-8,
-/// replacement characters may appear in the encoded text.
-pub async fn to_writer<'a, W: tokio::io::AsyncWriteExt + Unpin + ?Sized>(
-    writer: &'a mut W,
-    encoding_with_bom_info: (&'static Encoding, bool),
-    rope: &'a Rope,
-) -> Result<(), Error> {
-    // Text inside a `Rope` is stored as non-contiguous blocks of data called
-    // chunks. The absolute size of each chunk is unknown, thus it is impossible
-    // to predict the end of the chunk iterator ahead of time. Instead, it is
-    // determined by filtering the iterator to remove all empty chunks and then
-    // appending an empty chunk to it. This is valuable for detecting when all
-    // chunks in the `Rope` have been iterated over in the subsequent loop.
-    let (encoding, has_bom) = encoding_with_bom_info;
-
-    let iter = rope
-        .chunks()
-        .filter(|c| !c.is_empty())
-        .chain(std::iter::once(""));
-    let mut buf = [0u8; BUF_SIZE];
-
-    let mut total_written = if has_bom {
-        apply_bom(encoding, &mut buf)
-    } else {
-        0
-    };
-
-    let mut encoder = Encoder::from_encoding(encoding);
-
-    for chunk in iter {
-        let is_empty = chunk.is_empty();
-        let mut total_read = 0usize;
-
-        // An inner loop is necessary as it is possible that the input buffer
-        // may not be completely encoded on the first `encode_from_utf8()` call
-        // which would happen in cases where the output buffer is filled to
-        // capacity.
-        loop {
-            let (result, read, written, ..) =
-                encoder.encode_from_utf8(&chunk[total_read..], &mut buf[total_written..], is_empty);
-
-            // These variables act as the read and write cursors of `chunk` and `buf` respectively.
-            // They are necessary in case the output buffer fills before encoding of the entire input
-            // loop is complete. Otherwise, the loop would endlessly iterate over the same `chunk` and
-            // the data inside the output buffer would be overwritten.
-            total_read += read;
-            total_written += written;
-            match result {
-                encoding::CoderResult::InputEmpty => {
-                    debug_assert_eq!(chunk.len(), total_read);
-                    debug_assert!(buf.len() >= total_written);
-                    break;
-                }
-                encoding::CoderResult::OutputFull => {
-                    debug_assert!(chunk.len() > total_read);
-                    writer.write_all(&buf[..total_written]).await?;
-                    total_written = 0;
-                }
-            }
-        }
-
-        // Once the end of the iterator is reached, the output buffer is
-        // flushed and the outer loop terminates.
-        if is_empty {
-            writer.write_all(&buf[..total_written]).await?;
-            writer.flush().await?;
-            break;
-        }
-    }
-
-    Ok(())
-}
-
 fn take_with<T, F>(mut_ref: &mut T, f: F)
 where
     T: Default,
@@ -712,11 +524,11 @@ use url::Url;
 impl Document {
     pub fn from(
         text: Rope,
-        encoding_with_bom_info: Option<(&'static Encoding, bool)>,
+        encoding: Option<&'static Encoding>,
         config: Arc<dyn DynAccess<Config> + Send + Sync>,
         syn_loader: Arc<ArcSwap<syntax::Loader>>,
     ) -> Self {
-        let (encoding, has_bom) = encoding_with_bom_info.unwrap_or((encoding::UTF_8, false));
+        let encoding = encoding.unwrap_or(encoding::UTF_8);
         let line_ending = config.load().default_line_ending.into();
         let changes = ChangeSet::new(text.slice(..));
         let old_state = None;
@@ -726,7 +538,6 @@ impl Document {
             path: None,
             relative_path: OnceCell::new(),
             encoding,
-            has_bom,
             text,
             selections: HashMap::default(),
             inlay_hints: HashMap::default(),
@@ -800,7 +611,7 @@ impl Document {
         encoding = encoding.or(editor_config.encoding);
 
         // Open the file if it exists, otherwise assume it is a new file (and thus empty).
-        let (rope, encoding, has_bom) = if path.exists() {
+        let (rope, encoding, _has_bom) = if path.exists() {
             let mut file = std::fs::File::open(path)?;
             from_reader(&mut file, encoding)?
         } else {
@@ -812,7 +623,7 @@ impl Document {
         };
 
         let loader = syn_loader.load();
-        let mut doc = Self::from(rope, Some((encoding, has_bom)), config, syn_loader);
+        let mut doc = Self::from(rope, Some(encoding), config, syn_loader);
 
         // set the path and try detecting the language
         doc.set_path(Some(path));
@@ -824,357 +635,6 @@ impl Document {
         doc.detect_indent_and_line_ending();
 
         Ok(doc)
-    }
-
-    /// The same as [`format`], but only returns formatting changes if auto-formatting
-    /// is configured.
-    pub fn auto_format(
-        &self,
-        editor: &Editor,
-    ) -> Option<BoxFuture<'static, Result<Transaction, FormatterError>>> {
-        if self.language_config()?.auto_format {
-            self.format(editor)
-        } else {
-            None
-        }
-    }
-
-    /// If supported, returns the changes that should be applied to this document in order
-    /// to format it nicely.
-    // We can't use anyhow::Result here since the output of the future has to be
-    // clonable to be used as shared future. So use a custom error type.
-    pub fn format(
-        &self,
-        editor: &Editor,
-    ) -> Option<BoxFuture<'static, Result<Transaction, FormatterError>>> {
-        if let Some((fmt_cmd, fmt_args)) = self
-            .language_config()
-            .and_then(|c| c.formatter.as_ref())
-            .and_then(|formatter| {
-                Some((
-                    helix_stdx::env::which(&formatter.command).ok()?,
-                    &formatter.args,
-                ))
-            })
-        {
-            log::debug!(
-                "formatting '{}' with command '{}', args {fmt_args:?}",
-                self.display_name(),
-                fmt_cmd.display(),
-            );
-            use std::process::Stdio;
-            let text = self.text().clone();
-
-            let mut process = tokio::process::Command::new(&fmt_cmd);
-
-            if let Some(doc_dir) = self.path.as_ref().and_then(|path| path.parent()) {
-                process.current_dir(doc_dir);
-            }
-
-            let args = match fmt_args
-                .iter()
-                .map(|content| expansion::expand(editor, Token::expand(content)))
-                .collect::<Result<Vec<_>, _>>()
-            {
-                Ok(args) => args,
-                Err(err) => {
-                    log::error!("Failed to expand formatter arguments: {err}");
-                    return None;
-                }
-            };
-
-            process
-                .args(args.iter().map(AsRef::as_ref))
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-
-            let formatting_future = async move {
-                let mut process = process
-                    .spawn()
-                    .map_err(|e| FormatterError::SpawningFailed {
-                        command: fmt_cmd.to_string_lossy().into(),
-                        error: e.kind(),
-                    })?;
-
-                let mut stdin = process.stdin.take().ok_or(FormatterError::BrokenStdin)?;
-                let input_text = text.clone();
-                let input_task = tokio::spawn(async move {
-                    to_writer(&mut stdin, (encoding::UTF_8, false), &input_text).await
-                    // Note that `stdin` is dropped here, causing the pipe to close. This can
-                    // avoid a deadlock with `wait_with_output` below if the process is waiting on
-                    // stdin to close before exiting.
-                });
-                let (input_result, output_result) = tokio::join! {
-                    input_task,
-                    process.wait_with_output(),
-                };
-                let _ = input_result.map_err(|_| FormatterError::BrokenStdin)?;
-                let output = output_result.map_err(|_| FormatterError::WaitForOutputFailed)?;
-
-                if !output.status.success() {
-                    if !output.stderr.is_empty() {
-                        let err = String::from_utf8_lossy(&output.stderr).to_string();
-                        log::error!("Formatter error: {}", err);
-                        return Err(FormatterError::NonZeroExitStatus(Some(err)));
-                    }
-
-                    return Err(FormatterError::NonZeroExitStatus(None));
-                } else if !output.stderr.is_empty() {
-                    log::debug!(
-                        "Formatter printed to stderr: {}",
-                        String::from_utf8_lossy(&output.stderr)
-                    );
-                }
-
-                let str = std::str::from_utf8(&output.stdout)
-                    .map_err(|_| FormatterError::InvalidUtf8Output)?;
-
-                Ok(helix_core::diff::compare_ropes(&text, &Rope::from(str)))
-            };
-            return Some(formatting_future.boxed());
-        };
-
-        let text = self.text.clone();
-        // finds first language server that supports formatting and then formats
-        let language_server = self
-            .language_servers_with_feature(LanguageServerFeature::Format)
-            .next()?;
-        let offset_encoding = language_server.offset_encoding();
-        let request = language_server.text_document_formatting(
-            self.identifier(),
-            lsp::FormattingOptions {
-                tab_size: self.tab_width() as u32,
-                insert_spaces: matches!(self.indent_style, IndentStyle::Spaces(_)),
-                ..Default::default()
-            },
-            None,
-        )?;
-
-        let fut = async move {
-            let edits = request
-                .await
-                .unwrap_or_else(|e| {
-                    log::warn!("LSP formatting failed: {}", e);
-                    Default::default()
-                })
-                .unwrap_or_default();
-            Ok(helix_lsp::util::generate_transaction_from_edits(
-                &text,
-                edits,
-                offset_encoding,
-            ))
-        };
-        Some(fut.boxed())
-    }
-
-    pub fn save<P: Into<PathBuf>>(
-        &mut self,
-        path: Option<P>,
-        force: bool,
-    ) -> Result<
-        impl Future<Output = Result<DocumentSavedEvent, anyhow::Error>> + 'static + Send,
-        anyhow::Error,
-    > {
-        let path = path.map(|path| path.into());
-        self.save_impl(path, force)
-
-        // futures_util::future::Ready<_>,
-    }
-
-    /// The `Document`'s text is encoded according to its encoding and written to the file located
-    /// at its `path()`.
-    fn save_impl(
-        &mut self,
-        path: Option<PathBuf>,
-        force: bool,
-    ) -> Result<
-        impl Future<Output = Result<DocumentSavedEvent, anyhow::Error>> + 'static + Send,
-        anyhow::Error,
-    > {
-        log::debug!(
-            "submitting save of doc '{:?}'",
-            self.path().map(|path| path.to_string_lossy())
-        );
-
-        // we clone and move text + path into the future so that we asynchronously save the current
-        // state without blocking any further edits.
-        let text = self.text().clone();
-
-        let path = match path {
-            Some(path) => helix_stdx::path::canonicalize(path),
-            None => {
-                if self.path.is_none() {
-                    bail!("Can't save with no path set!");
-                }
-                self.path.as_ref().unwrap().clone()
-            }
-        };
-
-        let identifier = self.path().map(|_| self.identifier());
-        let language_servers: Vec<_> = self.language_servers.values().cloned().collect();
-
-        // mark changes up to now as saved
-        let current_rev = self.get_current_revision();
-        let doc_id = self.id();
-        let atomic_save = self.config.load().atomic_save;
-
-        let encoding_with_bom_info = (self.encoding, self.has_bom);
-        let last_saved_time = self.last_saved_time;
-
-        // We encode the file according to the `Document`'s encoding.
-        let future = async move {
-            use tokio::fs;
-            if let Some(parent) = path.parent() {
-                // TODO: display a prompt asking the user if the directories should be created
-                if !parent.exists() {
-                    if force {
-                        std::fs::DirBuilder::new().recursive(true).create(parent)?;
-                    } else {
-                        bail!("can't save file, parent directory does not exist (use :w! to create it)");
-                    }
-                }
-            }
-
-            // Protect against overwriting changes made externally
-            if !force {
-                if let Ok(metadata) = fs::metadata(&path).await {
-                    if let Ok(mtime) = metadata.modified() {
-                        if last_saved_time < mtime {
-                            bail!("file modified by an external process, use :w! to overwrite");
-                        }
-                    }
-                }
-            }
-            let write_path = tokio::fs::read_link(&path)
-                .await
-                .ok()
-                .and_then(|p| {
-                    if p.is_relative() {
-                        path.parent().map(|parent| parent.join(p))
-                    } else {
-                        Some(p)
-                    }
-                })
-                .unwrap_or_else(|| path.clone());
-
-            if readonly(&write_path) {
-                bail!(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "Path is read only"
-                ));
-            }
-
-            // Assume it is a hardlink to prevent data loss if the metadata cant be read (e.g. on certain Windows configurations)
-            let is_hardlink = helix_stdx::faccess::hardlink_count(&write_path).unwrap_or(2) > 1;
-            let is_symlink = match tokio::fs::symlink_metadata(&write_path).await {
-                Ok(meta) => meta.is_symlink(),
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
-                Err(err) => return Err(err.into()),
-            };
-            let must_copy = is_hardlink || is_symlink;
-            let backup = if path.exists() && atomic_save {
-                let path_ = write_path.clone();
-                // hacks: we use tempfile to handle the complex task of creating
-                // non clobbered temporary path for us we don't want
-                // the whole automatically delete path on drop thing
-                // since the path doesn't exist yet, we just want
-                // the path
-                tokio::task::spawn_blocking(move || -> Option<PathBuf> {
-                    let mut builder = tempfile::Builder::new();
-                    builder.prefix(path_.file_name()?).suffix(".bck");
-
-                    let backup_path = if must_copy {
-                        builder
-                            .make_in(path_.parent()?, |backup| std::fs::copy(&path_, backup))
-                            .ok()?
-                            .into_temp_path()
-                    } else {
-                        builder
-                            .make_in(path_.parent()?, |backup| std::fs::rename(&path_, backup))
-                            .ok()?
-                            .into_temp_path()
-                    };
-
-                    backup_path.keep().ok()
-                })
-                .await
-                .ok()
-                .flatten()
-            } else {
-                None
-            };
-
-            let write_result: anyhow::Result<_> = async {
-                let mut dst = tokio::fs::File::create(&write_path).await?;
-                to_writer(&mut dst, encoding_with_bom_info, &text).await?;
-                dst.sync_all().await?;
-                Ok(())
-            }
-            .await;
-
-            let save_time = match fs::metadata(&write_path).await {
-                Ok(metadata) => metadata.modified().map_or(SystemTime::now(), |mtime| mtime),
-                Err(_) => SystemTime::now(),
-            };
-
-            if let Some(backup) = backup {
-                if must_copy {
-                    let mut delete = true;
-                    if write_result.is_err() {
-                        // Restore backup
-                        let _ = tokio::fs::copy(&backup, &write_path).await.map_err(|e| {
-                            delete = false;
-                            log::error!("Failed to restore backup on write failure: {e}")
-                        });
-                    }
-
-                    if delete {
-                        // Delete backup
-                        let _ = tokio::fs::remove_file(backup)
-                            .await
-                            .map_err(|e| log::error!("Failed to remove backup file on write: {e}"));
-                    }
-                } else if write_result.is_err() {
-                    // restore backup
-                    let _ = tokio::fs::rename(&backup, &write_path)
-                        .await
-                        .map_err(|e| log::error!("Failed to restore backup on write failure: {e}"));
-                } else {
-                    // copy metadata and delete backup
-                    let _ = tokio::task::spawn_blocking(move || {
-                        let _ = copy_metadata(&backup, &write_path)
-                            .map_err(|e| log::error!("Failed to copy metadata on write: {e}"));
-                        let _ = std::fs::remove_file(backup)
-                            .map_err(|e| log::error!("Failed to remove backup file on write: {e}"));
-                    })
-                    .await;
-                }
-            }
-
-            write_result?;
-
-            let event = DocumentSavedEvent {
-                revision: current_rev,
-                save_time,
-                doc_id,
-                path,
-                text: text.clone(),
-            };
-
-            for language_server in language_servers {
-                if !language_server.is_initialized() {
-                    continue;
-                }
-                if let Some(id) = identifier.clone() {
-                    language_server.text_document_did_save(id, &text);
-                }
-            }
-
-            Ok(event)
-        };
-
-        Ok(future)
     }
 
     /// Detect the programming language based on the file type.
@@ -2271,37 +1731,6 @@ pub struct ViewData {
     view_position: ViewPosition,
 }
 
-#[derive(Clone, Debug)]
-pub enum FormatterError {
-    SpawningFailed {
-        command: String,
-        error: std::io::ErrorKind,
-    },
-    BrokenStdin,
-    WaitForOutputFailed,
-    InvalidUtf8Output,
-    NonZeroExitStatus(Option<String>),
-}
-
-impl std::error::Error for FormatterError {}
-
-impl Display for FormatterError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::SpawningFailed { command, error } => {
-                write!(f, "Failed to spawn formatter {}: {:?}", command, error)
-            }
-            Self::BrokenStdin => write!(f, "Could not write to formatter stdin"),
-            Self::WaitForOutputFailed => write!(f, "Waiting for formatter output failed"),
-            Self::InvalidUtf8Output => write!(f, "Invalid UTF-8 formatter output"),
-            Self::NonZeroExitStatus(Some(output)) => write!(f, "Formatter error: {}", output),
-            Self::NonZeroExitStatus(None) => {
-                write!(f, "Formatter exited with non zero exit status")
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod test {
     use arc_swap::ArcSwap;
@@ -2504,41 +1933,11 @@ mod test {
         };
     }
 
-    macro_rules! encode {
-        ($name:ident, $label:expr, $label_override:expr) => {
-            #[test]
-            fn $name() {
-                let encoding = encoding::Encoding::for_label($label_override.as_bytes()).unwrap();
-                let base_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/encoding");
-                let path = base_path.join(format!("{}_out.txt", $label));
-                let ref_path = base_path.join(format!("{}_out_ref.txt", $label));
-                assert!(path.exists());
-                assert!(ref_path.exists());
-
-                let text = Rope::from_str(&std::fs::read_to_string(path).unwrap());
-                let mut buf: Vec<u8> = Vec::new();
-                helix_lsp::block_on(to_writer(&mut buf, (encoding, false), &text)).unwrap();
-
-                let expectation = std::fs::read(ref_path).unwrap();
-                assert_eq!(buf, expectation);
-            }
-        };
-        ($name:ident, $label:expr) => {
-            encode!($name, $label, $label);
-        };
-    }
-
     decode!(big5_decode, "big5");
-    encode!(big5_encode, "big5");
     decode!(euc_kr_decode, "euc_kr", "EUC-KR");
-    encode!(euc_kr_encode, "euc_kr", "EUC-KR");
     decode!(gb18030_decode, "gb18030");
-    encode!(gb18030_encode, "gb18030");
     decode!(iso_2022_jp_decode, "iso_2022_jp", "ISO-2022-JP");
-    encode!(iso_2022_jp_encode, "iso_2022_jp", "ISO-2022-JP");
     decode!(jis0208_decode, "jis0208", "EUC-JP");
-    encode!(jis0208_encode, "jis0208", "EUC-JP");
     decode!(jis0212_decode, "jis0212", "EUC-JP");
     decode!(shift_jis_decode, "shift_jis");
-    encode!(shift_jis_encode, "shift_jis");
 }
