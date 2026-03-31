@@ -409,7 +409,7 @@ mod tests {
     #[should_panic]
     fn duplicate_keys_should_panic() {
         keymap!({ "Normal mode"
-            "i" => normal_mode,
+            "i" => goto_line_end,
             "i" => goto_definition,
         });
     }
@@ -424,12 +424,12 @@ mod tests {
     fn merge_partial_keys() {
         let keymap = hashmap! {
             Mode::Normal => keymap!({ "Normal mode"
-                "i" => normal_mode,
-                "无" => insert_mode,
+                "i" => goto_line_end,
+                "无" => goto_file_start,
                 "z" => jump_backward,
                 "g" => { "Merge into goto mode"
                     "$" => goto_line_end,
-                    "g" => delete_char_forward,
+                    "g" => goto_last_line,
                 },
             })
         };
@@ -440,12 +440,12 @@ mod tests {
         let mut keymap = Keymaps::new(Box::new(Constant(merged_keyamp.clone())));
         assert_eq!(
             keymap.get(Mode::Normal, key!('i')),
-            KeymapResult::Matched(MappableCommand::normal_mode),
+            KeymapResult::Matched(MappableCommand::goto_line_end),
             "Leaf should replace leaf"
         );
         assert_eq!(
             keymap.get(Mode::Normal, key!('无')),
-            KeymapResult::Matched(MappableCommand::insert_mode),
+            KeymapResult::Matched(MappableCommand::goto_file_start),
             "New leaf should be present in merged keymap"
         );
         // Assumes that z is a node in the default keymap
@@ -465,7 +465,7 @@ mod tests {
         // Assumes that `gg` is in default keymap
         assert_eq!(
             keymap.search(&[key!('g'), key!('g')]).unwrap(),
-            &KeyTrie::MappableCommand(MappableCommand::delete_char_forward),
+            &KeyTrie::MappableCommand(MappableCommand::goto_last_line),
             "Leaf should replace old leaf in merged subnode"
         );
         // Assumes that `ge` is in default keymap
@@ -536,7 +536,7 @@ mod tests {
     #[test]
     fn reverse_map() {
         let normal_mode = keymap!({ "Normal mode"
-            "i" => insert_mode,
+            "i" => goto_line_end,
             "g" => { "Goto"
                 "g" => goto_file_start,
                 "e" => goto_file_end,
@@ -556,7 +556,7 @@ mod tests {
         assert_eq!(
             reverse_map,
             HashMap::from([
-                ("insert_mode".to_string(), vec![vec![key!('i')]]),
+                ("goto_line_end".to_string(), vec![vec![key!('i')]]),
                 (
                     "goto_file_start".to_string(),
                     vec![vec![key!('g'), key!('g')]]

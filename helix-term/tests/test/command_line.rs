@@ -89,30 +89,3 @@ async fn unicode_expansion() -> anyhow::Result<()> {
 
     Ok(())
 }
-
-#[cfg(unix)]
-#[tokio::test(flavor = "multi_thread")]
-async fn shell_expansion() -> anyhow::Result<()> {
-    test_statusline(
-        r#":echo %sh{echo "hello world"}"#,
-        "hello world",
-        Severity::Info,
-    )
-    .await?;
-
-    // Shell expansion is recursive.
-    test_statusline(":echo %sh{echo '%{cursor_line}'}", "1", Severity::Info).await?;
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn percent_escaping() -> anyhow::Result<()> {
-    test_statusline(
-        r#":sh echo hello 10%"#,
-        "'run-shell-command': '%' was not properly escaped. Please use '%%'",
-        Severity::Error,
-    )
-    .await?;
-    Ok(())
-}

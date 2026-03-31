@@ -62,6 +62,20 @@ impl TabManager {
     /// Adds the DocView to `editor.tabs` and creates a thin EditorView shell.
     /// Removes the welcome tab if present.
     pub fn new_editor_tab(&mut self, doc: helix_view::Document, editor: &mut helix_view::Editor) {
+        // If the file is already open in an existing tab, activate it instead.
+        if let Some(new_path) = doc.path().and_then(|p| std::fs::canonicalize(p).ok()) {
+            for (i, tab) in editor.tabs.iter().enumerate() {
+                if let Some(existing) = tab.doc().path().and_then(|p| std::fs::canonicalize(p).ok())
+                {
+                    if existing == new_path {
+                        editor.activate_tab(i);
+                        self.active = i;
+                        return;
+                    }
+                }
+            }
+        }
+
         // Remove welcome tab before adding a real tab
         if self.has_welcome_tab() {
             self.tabs.remove(0);
@@ -78,6 +92,19 @@ impl TabManager {
     /// Static helper that opens a document in a new editor tab.
     /// Takes layer_state out of Editor temporarily to avoid double-mutable-borrow.
     pub fn add_editor_tab(editor: &mut helix_view::Editor, doc: helix_view::Document) {
+        // If the file is already open in an existing tab, activate it instead.
+        if let Some(new_path) = doc.path().and_then(|p| std::fs::canonicalize(p).ok()) {
+            for (i, tab) in editor.tabs.iter().enumerate() {
+                if let Some(existing) = tab.doc().path().and_then(|p| std::fs::canonicalize(p).ok())
+                {
+                    if existing == new_path {
+                        editor.activate_tab(i);
+                        return;
+                    }
+                }
+            }
+        }
+
         let mut layer_box = std::mem::replace(&mut editor.layer_state, Box::new(()));
         {
             let ls = layer_box

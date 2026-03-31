@@ -1175,16 +1175,10 @@ impl Component for EditorView {
                     EventResult::Ignored(None)
                 } else {
                     let config = cx.editor.config();
-                    let mode = cx.editor.mode();
                     let (view, doc) = current!(cx.editor);
 
                     view.ensure_cursor_in_view(doc, config.scrolloff);
 
-                    // Store a history state if not in insert mode. This also takes care of
-                    // committing changes when leaving insert mode.
-                    if mode != Mode::Normal {
-                        doc.append_changes_to_history(view);
-                    }
                     let callback = if callbacks.is_empty() {
                         None
                     } else {

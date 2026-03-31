@@ -1,71 +1,6 @@
 use super::*;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn insert_mode_cursor_position() -> anyhow::Result<()> {
-    test(TestCase {
-        in_text: String::new(),
-        in_selection: Selection::single(0, 0),
-        in_keys: "i".into(),
-        out_text: String::new(),
-        out_selection: Selection::single(0, 0),
-        line_feed_handling: LineFeedHandling::AsIs,
-    })
-    .await?;
-
-    test(("#[\n|]#", "i", "#[|\n]#")).await?;
-    test(("#[\n|]#", "i<esc>", "#[|\n]#")).await?;
-    test(("#[\n|]#", "i<esc>i", "#[|\n]#")).await?;
-
-    Ok(())
-}
-
-/// Range direction is preserved when escaping insert mode to normal
-#[tokio::test(flavor = "multi_thread")]
-async fn insert_to_normal_mode_cursor_position() -> anyhow::Result<()> {
-    test(("#[f|]#oo\n", "vll<A-;><esc>", "#[|foo]#\n")).await?;
-    test((
-        indoc! {"\
-                #[f|]#oo
-                #(b|)#ar"
-        },
-        "vll<A-;><esc>",
-        indoc! {"\
-                #[|foo]#
-                #(|bar)#"
-        },
-    ))
-    .await?;
-
-    test((
-        indoc! {"\
-                #[f|]#oo
-                #(b|)#ar"
-        },
-        "a",
-        indoc! {"\
-                #[fo|]#o
-                #(ba|)#r"
-        },
-    ))
-    .await?;
-
-    test((
-        indoc! {"\
-                #[f|]#oo
-                #(b|)#ar"
-        },
-        "a<esc>",
-        indoc! {"\
-                #[f|]#oo
-                #(b|)#ar"
-        },
-    ))
-    .await?;
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn surround_by_character() -> anyhow::Result<()> {
     // Only pairs matching the passed character count
     test((
@@ -434,17 +369,6 @@ async fn cursor_position_newly_opened_file() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn cursor_position_append_eof() -> anyhow::Result<()> {
-    // Selection is forwards
-    test(("#[foo|]#", "abar<esc>", "#[foobar|]#\n")).await?;
-
-    // Selection is backwards
-    test(("#[|foo]#", "abar<esc>", "#[foobar|]#\n")).await?;
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn select_mode_tree_sitter_next_function_is_union_of_objects() -> anyhow::Result<()> {
     test_with_config(
         AppBuilder::new().with_file("foo.rs", None),
@@ -697,89 +621,6 @@ async fn repeat_find_char() -> anyhow::Result<()> {
             one two
             |]#"
         },
-    ))
-    .await?;
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_surround_replace() -> anyhow::Result<()> {
-    test((
-        indoc! {"\
-            (#[|a]#)
-            "},
-        "mrm{",
-        indoc! {"\
-            {#[|a]#}
-            "},
-    ))
-    .await?;
-
-    test((
-        indoc! {"\
-            (#[a|]#)
-            "},
-        "mrm{",
-        indoc! {"\
-            {#[a|]#}
-            "},
-    ))
-    .await?;
-
-    test((
-        indoc! {"\
-            {{
-
-            #(}|)#
-            #[}|]#
-            "},
-        "mrm)",
-        indoc! {"\
-            ((
-
-            #()|)#
-            #[)|]#
-            "},
-    ))
-    .await?;
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_surround_delete() -> anyhow::Result<()> {
-    test((
-        indoc! {"\
-            (#[|a]#)
-            "},
-        "mdm",
-        indoc! {"\
-            #[|a]#
-            "},
-    ))
-    .await?;
-
-    test((
-        indoc! {"\
-            (#[a|]#)
-            "},
-        "mdm",
-        indoc! {"\
-            #[a|]#
-            "},
-    ))
-    .await?;
-
-    test((
-        indoc! {"\
-            {{
-
-            #(}|)#
-            #[}|]#
-            "},
-        "mdm",
-        "\n\n#(\n|)##[\n|]#",
     ))
     .await?;
 

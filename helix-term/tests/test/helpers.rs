@@ -1,15 +1,14 @@
 use std::{
-    io::{Read, Write},
+    io::Write,
     mem::replace,
     path::PathBuf,
     time::Duration,
 };
 
 use anyhow::bail;
-use helix_core::{diagnostic::Severity, test, Selection, Transaction};
+use helix_core::{test, Selection, Transaction};
 use helix_term::{application::Application, args::Args, config::Config, keymap::merge_keys};
-use helix_view::{current_ref, doc, editor::LspConfig, input::parse_macro, Editor};
-use tempfile::NamedTempFile;
+use helix_view::{current_ref, doc, editor::LspConfig, input::parse_macro};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 #[cfg(windows)]
@@ -25,8 +24,6 @@ pub enum LineFeedHandling {
     /// ending to the end of a string.
     Native,
 
-    /// Do not modify the input text in any way. What you give is what you test.
-    AsIs,
 }
 
 impl LineFeedHandling {
@@ -35,7 +32,6 @@ impl LineFeedHandling {
     pub fn apply(&self, text: &str) -> String {
         let line_end = match self {
             LineFeedHandling::Native => helix_core::NATIVE_LINE_ENDING,
-            LineFeedHandling::AsIs => return text.into(),
         }
         .as_str();
 
@@ -64,8 +60,6 @@ pub struct TestCase {
     pub in_keys: String,
     pub out_text: String,
     pub out_selection: Selection,
-
-    pub line_feed_handling: LineFeedHandling,
 }
 
 impl<S, R, V> From<(S, R, V)> for TestCase
@@ -75,17 +69,7 @@ where
     V: Into<String>,
 {
     fn from((input, keys, output): (S, R, V)) -> Self {
-        TestCase::from((input, keys, output, LineFeedHandling::default()))
-    }
-}
-
-impl<S, R, V> From<(S, R, V, LineFeedHandling)> for TestCase
-where
-    S: Into<String>,
-    R: Into<String>,
-    V: Into<String>,
-{
-    fn from((input, keys, output, line_feed_handling): (S, R, V, LineFeedHandling)) -> Self {
+        let line_feed_handling = LineFeedHandling::default();
         let (in_text, in_selection) = test::print(&line_feed_handling.apply(&input.into()));
         let (out_text, out_selection) = test::print(&line_feed_handling.apply(&output.into()));
 
@@ -95,7 +79,6 @@ where
             in_keys: keys.into(),
             out_text,
             out_selection,
-            line_feed_handling,
         }
     }
 }
@@ -164,7 +147,7 @@ pub async fn test_key_sequences(
     }
 
     if !should_exit {
-        for key_event in parse_macro("<esc>:q!<ret>")?.into_iter() {
+        for key_event in parse_macro("<esc>:quit<ret>")?.into_iter() {
             tx.send(Ok(Event::Key(KeyEvent::from(key_event))))?;
         }
 
@@ -197,7 +180,7 @@ pub async fn test_key_sequence_with_input_text<T: Into<TestCase>>(
 
     let mut app = match app {
         Some(app) => app,
-        None => Application::new(Args::default(), test_config(), test_syntax_loader(None))?,
+        None => AppBuilder::new().build()?,
     };
 
     let (view, doc) = helix_view::current!(app.editor);
@@ -298,29 +281,6 @@ pub fn test_editor_config() -> helix_view::editor::Config {
     }
 }
 
-/// Creates a new temporary file that is set to read only. Useful for
-/// testing write failures.
-pub fn new_readonly_tempfile() -> anyhow::Result<NamedTempFile> {
-    let mut file = tempfile::NamedTempFile::new()?;
-    let metadata = file.as_file().metadata()?;
-    let mut perms = metadata.permissions();
-    perms.set_readonly(true);
-    file.as_file_mut().set_permissions(perms)?;
-    Ok(file)
-}
-
-/// Creates a new temporary file in the directory that is set to read only. Useful for
-/// testing write failures.
-pub fn new_readonly_tempfile_in_dir(
-    dir: impl AsRef<std::path::Path>,
-) -> anyhow::Result<NamedTempFile> {
-    let mut file = tempfile::NamedTempFile::new_in(dir)?;
-    let metadata = file.as_file().metadata()?;
-    let mut perms = metadata.permissions();
-    perms.set_readonly(true);
-    file.as_file_mut().set_permissions(perms)?;
-    Ok(file)
-}
 pub struct AppBuilder {
     args: Args,
     config: Config,
@@ -365,16 +325,6 @@ impl AppBuilder {
         self
     }
 
-    pub fn with_input_text<S: Into<String>>(mut self, input_text: S) -> Self {
-        self.input = Some(test::print(&input_text.into()));
-        self
-    }
-
-    pub fn with_lang_loader(mut self, syn_loader: helix_core::syntax::Loader) -> Self {
-        self.syn_loader = syn_loader;
-        self
-    }
-
     pub fn build(self) -> anyhow::Result<Application> {
         if let Some(path) = &self.args.working_directory {
             bail!("Changing the working directory to {path:?} is not yet supported for integration tests");
@@ -385,6 +335,17 @@ impl AppBuilder {
         }
 
         let mut app = Application::new(self.args, self.config, self.syn_loader)?;
+
+        // If no files were opened (e.g. no session to restore), the editor
+        // shows the welcome page and editor.tabs is empty.  Tests that use
+        // current!() need at least one tab, so create a scratch document.
+        if app.editor.tab_count() == 0 {
+            let doc = helix_view::Document::default(
+                app.editor.config.clone(),
+                app.editor.syn_loader.clone(),
+            );
+            helix_term::ui::TabManager::add_editor_tab(&mut app.editor, doc);
+        }
 
         if let Some((text, selection)) = self.input {
             let (view, doc) = helix_view::current!(app.editor);
@@ -402,34 +363,3 @@ impl AppBuilder {
     }
 }
 
-pub async fn run_event_loop_until_idle(app: &mut Application) {
-    let (_, rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut rx_stream = UnboundedReceiverStream::new(rx);
-    app.event_loop_until_idle(&mut rx_stream).await;
-}
-
-pub fn assert_file_has_content(file: &mut NamedTempFile, content: &str) -> anyhow::Result<()> {
-    reload_file(file)?;
-
-    let mut file_content = String::new();
-    file.read_to_string(&mut file_content)?;
-    assert_eq!(file_content, content);
-
-    Ok(())
-}
-
-pub fn assert_status_not_error(editor: &Editor) {
-    if let Some((_, sev)) = editor.get_status() {
-        assert_ne!(&Severity::Error, sev);
-    }
-}
-
-pub fn reload_file(file: &mut NamedTempFile) -> anyhow::Result<()> {
-    let path = file.path();
-    let f = std::fs::OpenOptions::new()
-        .write(true)
-        .read(true)
-        .open(&path)?;
-    *file.as_file_mut() = f;
-    Ok(())
-}
