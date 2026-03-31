@@ -16,6 +16,7 @@ use crate::config::Config;
 use crate::keymap::Keymaps;
 
 use super::app::Application;
+use super::welcome::WelcomePage;
 use super::EditorView;
 
 pub struct TabManager {
@@ -43,9 +44,29 @@ impl TabManager {
         Keymaps::new(keys)
     }
 
+    /// Returns true if the only tab is a WelcomePage.
+    fn has_welcome_tab(&self) -> bool {
+        self.tabs.len() == 1
+            && self.tabs[0].as_any().downcast_ref::<WelcomePage>().is_some()
+    }
+
+    /// Insert a WelcomePage tab if there are no tabs.
+    pub fn ensure_welcome_tab(&mut self) {
+        if self.tabs.is_empty() {
+            self.tabs.push(Box::new(WelcomePage::new()));
+            self.active = 0;
+        }
+    }
+
     /// Create a new EditorView tab for the given document.
     /// Adds the DocView to `editor.tabs` and creates a thin EditorView shell.
+    /// Removes the welcome tab if present.
     pub fn new_editor_tab(&mut self, doc: helix_view::Document, editor: &mut helix_view::Editor) {
+        // Remove welcome tab before adding a real tab
+        if self.has_welcome_tab() {
+            self.tabs.remove(0);
+        }
+
         let dv = helix_view::DocView::new(doc);
         let tab_index = editor.add_tab(dv);
         let keymaps = self.make_keymaps();
@@ -121,11 +142,24 @@ impl TabManager {
 
     /// Sync TabManager's shell list with Editor's tabs.
     /// Removes extra shells and updates tab_index on each EditorView.
+    /// If all editor tabs are gone, inserts a welcome tab.
     fn sync_with_editor(&mut self, editor: &helix_view::Editor) {
+        // Skip sync if showing welcome tab (no editor tabs to sync with)
+        if self.has_welcome_tab() {
+            return;
+        }
+
         // Remove shells if editor has fewer tabs
         while self.tabs.len() > editor.tab_count() {
             self.tabs.pop();
         }
+
+        // If all tabs were closed, show welcome page
+        if self.tabs.is_empty() {
+            self.ensure_welcome_tab();
+            return;
+        }
+
         // Update active index
         self.active = editor.active_tab;
         // Update tab_index on each EditorView shell
@@ -262,8 +296,10 @@ impl TabManager {
         // Render pending keys from active tab
         if area.width.saturating_sub(status_msg_width as u16) > key_width {
             let mut disp = String::new();
-            if let Some(count) = editor.tabs[editor.active_tab].count {
-                disp.push_str(&count.to_string());
+            if let Some(dv) = editor.tabs.get(editor.active_tab) {
+                if let Some(count) = dv.count {
+                    disp.push_str(&count.to_string());
+                }
             }
             if let Some(tab) = self.active_tab() {
                 disp.push_str(&tab.pending_keys());

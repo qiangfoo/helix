@@ -87,6 +87,16 @@ pub fn get_repo_info(file: &Path) -> Result<(Arc<ArcSwap<Box<str>>>, Option<Stri
     ))
 }
 
+pub fn get_branch_name(cwd: &Path) -> Result<String> {
+    let repo = open_repo(cwd)?.to_thread_local();
+    let head_ref = repo.head_ref()?;
+    let name = match head_ref {
+        Some(reference) => reference.name().shorten().to_string(),
+        None => repo.head_commit()?.id.to_hex_with_len(8).to_string(),
+    };
+    Ok(name)
+}
+
 pub fn get_worktree_root(cwd: &Path) -> Result<PathBuf> {
     let repo = open_repo(cwd)?.to_thread_local();
     let workdir = repo

@@ -36,6 +36,19 @@ pub struct DiffProviderRegistry {
     providers: Vec<DiffProvider>,
 }
 
+/// Returns the current branch name (or short commit hash) for the given directory.
+pub fn get_branch_name(cwd: &Path) -> Option<String> {
+    #[cfg(feature = "git")]
+    {
+        git::get_branch_name(cwd).ok()
+    }
+    #[cfg(not(feature = "git"))]
+    {
+        let _ = cwd;
+        None
+    }
+}
+
 /// Returns the git worktree root for the given directory, if in a git repo.
 pub fn get_worktree_root(cwd: &Path) -> Option<PathBuf> {
     #[cfg(feature = "git")]

@@ -1068,6 +1068,8 @@ pub struct Editor {
     pub dir_stack: VecDeque<PathBuf>,
 
     pub exit_code: i32,
+    /// Set to true when the editor should exit (e.g. :quit).
+    pub should_exit: bool,
 
     pub config_events: (UnboundedSender<ConfigEvent>, UnboundedReceiver<ConfigEvent>),
     pub needs_redraw: bool,
@@ -1156,6 +1158,7 @@ impl Editor {
             last_cwd: None,
             config,
             exit_code: 0,
+            should_exit: false,
             config_events: unbounded_channel(),
             needs_redraw: false,
             handlers,
@@ -1655,7 +1658,7 @@ impl Editor {
     }
 
     pub fn should_close(&self) -> bool {
-        self.tabs.is_empty()
+        self.should_exit
     }
 
     pub fn ensure_cursor_in_view(&mut self, id: ViewId) {

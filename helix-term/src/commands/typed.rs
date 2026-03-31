@@ -71,11 +71,7 @@ fn quit(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> anyhow
     }
 
     cx.block_try_flush_writes()?;
-    // Save session before clearing tabs
-    crate::session::save_session(cx.editor);
-    // Close all tabs to exit
-    cx.editor.tabs.clear();
-    cx.editor.active_tab = 0;
+    cx.editor.should_exit = true;
 
     Ok(())
 }
@@ -231,11 +227,7 @@ fn quit_all_impl(cx: &mut compositor::Context, force: bool) -> anyhow::Result<()
         buffers_remaining_impl(cx.editor)?;
     }
 
-    // Save session before clearing tabs
-    crate::session::save_session(cx.editor);
-    // Close all tabs to exit
-    cx.editor.tabs.clear();
-    cx.editor.active_tab = 0;
+    cx.editor.should_exit = true;
 
     Ok(())
 }
@@ -2282,6 +2274,27 @@ pub(super) fn execute_command(
 }
 
 #[allow(clippy::unnecessary_unwrap)]
+/// Create a command prompt and return it as a compositor callback.
+/// Used by the welcome page to open `:` command mode.
+pub fn command_mode_callback(editor: &Editor) -> compositor::Callback {
+    let mut prompt = Prompt::new(
+        ":".into(),
+        Some(':'),
+        complete_command_line,
+        move |cx: &mut compositor::Context, input: &str, event: PromptEvent| {
+            if let Err(err) = execute_command_line(cx, input, event) {
+                cx.editor.set_error(err.to_string());
+            }
+        },
+    );
+    prompt.doc_fn = Box::new(command_line_doc);
+    prompt.recalculate_completion(editor);
+
+    Box::new(move |compositor: &mut compositor::Compositor, _ctx: &mut compositor::Context| {
+        compositor.push(Box::new(prompt));
+    })
+}
+
 pub(super) fn command_mode(cx: &mut Context) {
     let mut prompt = Prompt::new(
         ":".into(),

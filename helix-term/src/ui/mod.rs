@@ -16,6 +16,7 @@ mod statusline;
 pub mod tab_manager;
 mod text;
 mod text_decorations;
+pub mod welcome;
 
 use crate::compositor::Compositor;
 use crate::filter_picker_entry;

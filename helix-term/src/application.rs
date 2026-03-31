@@ -190,17 +190,13 @@ impl Application {
                     }
                 }
 
-                if nr_of_files == 0 {
-                    docs_to_open.push(Document::default(editor.config.clone(), editor.syn_loader.clone()));
-                } else {
+                if nr_of_files > 0 {
                     editor.set_status(format!(
                         "Loaded {} file{}.",
                         nr_of_files,
                         if nr_of_files == 1 { "" } else { "s" }
                     ));
                 }
-            } else {
-                docs_to_open.push(Document::default(editor.config.clone(), editor.syn_loader.clone()));
             }
         } else if stdin().is_terminal() || cfg!(feature = "integration") {
             if let Some(session_files) = crate::session::load_session() {
@@ -220,11 +216,7 @@ impl Application {
                         nr_of_files,
                         if nr_of_files == 1 { "" } else { "s" }
                     ));
-                } else {
-                    docs_to_open.push(Document::default(editor.config.clone(), editor.syn_loader.clone()));
                 }
-            } else {
-                docs_to_open.push(Document::default(editor.config.clone(), editor.syn_loader.clone()));
             }
         } else {
             docs_to_open.push(Document::default(editor.config.clone(), editor.syn_loader.clone()));
@@ -239,6 +231,8 @@ impl Application {
             if tab_manager.tab_count() > 0 {
                 tab_manager.activate_tab(0);
                 editor.active_tab = 0;
+            } else {
+                tab_manager.ensure_welcome_tab();
             }
         }
 
@@ -300,7 +294,9 @@ impl Application {
         self.compositor.render(area, surface, &mut cx);
         let (pos, kind) = self.compositor.cursor(area, &self.editor);
         // reset cursor cache
-        self.editor.tabs[self.editor.active_tab].cursor_cache.reset();
+        if let Some(dv) = self.editor.tabs.get_mut(self.editor.active_tab) {
+            dv.cursor_cache.reset();
+        }
 
         let pos = pos.map(|pos| (pos.col as u16, pos.row as u16));
         self.terminal.draw(pos, kind).unwrap();
@@ -1262,11 +1258,7 @@ impl Application {
         //        want to try to run as much cleanup as we can, regardless of
         //        errors along the way
 
-        // Session is already saved by the quit commands before they clear tabs,
-        // so only save here if tabs are still populated (e.g. abnormal shutdown).
-        if !self.editor.tabs.is_empty() {
-            crate::session::save_session(&self.editor);
-        }
+        crate::session::save_session(&self.editor);
 
         let mut errs = Vec::new();
 

@@ -609,8 +609,10 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
 
         match path_or_id {
             PathOrId::Path(path) => {
-                if editor.tabs[editor.active_tab].doc.path().map_or(false, |p| p == path) {
-                    return Some((Preview::EditorDocument(&editor.tabs[editor.active_tab].doc), range));
+                if let Some(dv) = editor.tabs.get(editor.active_tab) {
+                    if dv.doc.path().map_or(false, |p| p == path) {
+                        return Some((Preview::EditorDocument(&dv.doc), range));
+                    }
                 }
 
                 if self.preview_cache.contains_key(path) {
