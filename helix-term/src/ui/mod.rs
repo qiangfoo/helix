@@ -1,7 +1,11 @@
+pub mod active_app_proxy;
 pub mod app;
-mod document;
+pub mod diff_view;
+pub mod key_menu;
+pub mod textobject_menu;
+pub(crate) mod document;
 pub(crate) mod editor;
-mod icons;
+pub(crate) mod icons;
 mod info;
 pub mod lsp;
 mod markdown;
@@ -15,12 +19,14 @@ mod spinner;
 mod statusline;
 pub mod tab_manager;
 mod text;
-mod text_decorations;
+pub(crate) mod text_decorations;
 pub mod welcome;
 
 use crate::filter_picker_entry;
 use crate::job::{self, Callback};
-pub use app::{AppId, Application};
+pub use active_app_proxy::ActiveAppProxy;
+pub use app::{AppId, Application, EditorApps};
+pub use diff_view::DiffView;
 pub use editor::EditorView;
 pub use tab_manager::TabManager;
 use helix_stdx::rope;
@@ -301,7 +307,8 @@ pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
             Ok(doc) => {
                 let callback = crate::job::Callback::Editor(Box::new(
                     move |editor: &mut Editor| {
-                        TabManager::add_editor_tab(editor, doc);
+                        use crate::ui::EditorApps;
+                        editor.add_editor_app(doc);
                     },
                 ));
                 cx.jobs.callback(async { Ok(callback) });
@@ -415,7 +422,8 @@ pub fn file_explorer(root: PathBuf, editor: &Editor) -> Result<FileExplorer, std
                     Ok(doc) => {
                         let callback = crate::job::Callback::Editor(Box::new(
                             move |editor: &mut Editor| {
-                                TabManager::add_editor_tab(editor, doc);
+                                use crate::ui::EditorApps;
+                                editor.add_editor_app(doc);
                             },
                         ));
                         cx.jobs.callback(async { Ok(callback) });

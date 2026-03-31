@@ -2,21 +2,16 @@ pub mod default;
 pub mod macros;
 
 pub use crate::commands::MappableCommand;
-use arc_swap::{
-    access::{DynAccess, DynGuard},
-    ArcSwap,
-};
+use arc_swap::{access::{DynAccess, DynGuard}, ArcSwap};
 use helix_view::{document::Mode, info::Info, input::KeyEvent};
 use serde::Deserialize;
 use std::{
-    borrow::Cow,
     collections::{BTreeSet, HashMap},
     ops::{Deref, DerefMut},
     sync::Arc,
 };
 
 pub use default::default;
-use macros::key;
 
 #[derive(Debug, Clone, Default)]
 pub struct KeyTrieNode {
@@ -272,15 +267,13 @@ impl KeyTrie {
 #[derive(Debug, Clone, PartialEq)]
 pub enum KeymapResult {
     /// Needs more keys to execute a command. Contains valid keys for next keystroke.
+    /// Caller should push a KeyMenu layer with this node.
     Pending(KeyTrieNode),
     Matched(MappableCommand),
     /// Matched a sequence of commands to execute.
     MatchedSequence(Vec<MappableCommand>),
-    /// Key was not found in the root keymap
+    /// Key was not found in the root keymap.
     NotFound,
-    /// Key is invalid in combination with previous keys. Contains keys leading upto
-    /// and including current (invalid) key.
-    Cancelled(Vec<KeyEvent>),
 }
 
 /// A map of command names to keybinds that will execute the command.
@@ -288,96 +281,40 @@ pub type ReverseKeymap = HashMap<String, Vec<Vec<KeyEvent>>>;
 
 pub struct Keymaps {
     pub map: Box<dyn DynAccess<HashMap<Mode, KeyTrie>>>,
-    /// Stores pending keys waiting for the next key. This is relative to a
-    /// sticky node if one is in use.
-    state: Vec<KeyEvent>,
-    /// Stores the sticky node if one is activated.
-    pub sticky: Option<KeyTrieNode>,
 }
 
 impl Keymaps {
     pub fn new(map: Box<dyn DynAccess<HashMap<Mode, KeyTrie>>>) -> Self {
-        Self {
-            map,
-            state: Vec::new(),
-            sticky: None,
-        }
+        Self { map }
     }
 
     pub fn map(&self) -> DynGuard<HashMap<Mode, KeyTrie>> {
         self.map.load()
     }
 
-    /// Returns list of keys waiting to be disambiguated in current mode.
-    pub fn pending(&self) -> &[KeyEvent] {
-        &self.state
+    /// Stateless single-level lookup. Returns what the key maps to in the given mode.
+    /// Multi-key sequences are handled by pushing a KeyMenu layer on `Pending`.
+    pub fn get(&self, mode: Mode, key: KeyEvent) -> KeymapResult {
+        let keymaps = &*self.map();
+        let Some(keymap) = keymaps.get(&mode) else {
+            return KeymapResult::NotFound;
+        };
+
+        match keymap.search(&[key]) {
+            Some(KeyTrie::MappableCommand(cmd)) => KeymapResult::Matched(cmd.clone()),
+            Some(KeyTrie::Sequence(cmds)) => KeymapResult::MatchedSequence(cmds.clone()),
+            Some(KeyTrie::Node(node)) => KeymapResult::Pending(node.clone()),
+            None => KeymapResult::NotFound,
+        }
     }
 
-    pub fn sticky(&self) -> Option<&KeyTrieNode> {
-        self.sticky.as_ref()
-    }
-
+    /// Check if a key is bound in the given mode.
     pub fn contains_key(&self, mode: Mode, key: KeyEvent) -> bool {
         let keymaps = &*self.map();
-        let keymap = &keymaps[&mode];
-        keymap
-            .search(self.pending())
-            .and_then(KeyTrie::node)
-            .is_some_and(|node| node.contains_key(&key))
-    }
-
-    /// Lookup `key` in the keymap to try and find a command to execute. Escape
-    /// key cancels pending keystrokes. If there are no pending keystrokes but a
-    /// sticky node is in use, it will be cleared.
-    pub fn get(&mut self, mode: Mode, key: KeyEvent) -> KeymapResult {
-        // TODO: remove the sticky part and look up manually
-        let keymaps = &*self.map();
-        let keymap = &keymaps[&mode];
-
-        if key!(Esc) == key {
-            if !self.state.is_empty() {
-                // Note that Esc is not included here
-                return KeymapResult::Cancelled(self.state.drain(..).collect());
-            }
-            self.sticky = None;
-        }
-
-        let first = self.state.first().unwrap_or(&key);
-        let trie_node = match self.sticky {
-            Some(ref trie) => Cow::Owned(KeyTrie::Node(trie.clone())),
-            None => Cow::Borrowed(keymap),
-        };
-
-        let trie = match trie_node.search(&[*first]) {
-            Some(KeyTrie::MappableCommand(ref cmd)) => {
-                return KeymapResult::Matched(cmd.clone());
-            }
-            Some(KeyTrie::Sequence(ref cmds)) => {
-                return KeymapResult::MatchedSequence(cmds.clone());
-            }
-            None => return KeymapResult::NotFound,
-            Some(t) => t,
-        };
-
-        self.state.push(key);
-        match trie.search(&self.state[1..]) {
-            Some(KeyTrie::Node(map)) => {
-                if map.is_sticky {
-                    self.state.clear();
-                    self.sticky = Some(map.clone());
-                }
-                KeymapResult::Pending(map.clone())
-            }
-            Some(KeyTrie::MappableCommand(cmd)) => {
-                self.state.clear();
-                KeymapResult::Matched(cmd.clone())
-            }
-            Some(KeyTrie::Sequence(cmds)) => {
-                self.state.clear();
-                KeymapResult::MatchedSequence(cmds.clone())
-            }
-            None => KeymapResult::Cancelled(self.state.drain(..).collect()),
-        }
+        keymaps
+            .get(&mode)
+            .and_then(|keymap| keymap.search(&[key]))
+            .is_some()
     }
 }
 

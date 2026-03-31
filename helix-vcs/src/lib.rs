@@ -18,6 +18,34 @@ pub struct CommitInfo {
     pub date: String,
 }
 
+/// Classification of a line in a diff view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffLineKind {
+    Context,
+    Added,
+    Deleted,
+    HunkHeader,
+}
+
+/// A single hunk within a per-file diff.
+pub struct FileDiffHunk {
+    pub old_start: usize,
+    pub old_count: usize,
+    pub new_start: usize,
+    pub new_count: usize,
+    pub lines: Vec<(DiffLineKind, String)>,
+}
+
+/// Per-file structured diff data.
+pub struct FileDiff {
+    /// Relative path of the file within the worktree.
+    pub path: String,
+    /// Change kind indicator: 'M' modified, 'A' added, 'D' deleted, 'R' renamed.
+    pub change_kind: char,
+    /// The hunks that make up this file's diff.
+    pub hunks: Vec<FileDiffHunk>,
+}
+
 #[cfg(feature = "git")]
 mod git;
 
@@ -28,6 +56,9 @@ pub use diff::{DiffHandle, Hunk};
 mod status;
 
 pub use status::FileChange;
+
+mod file_diff;
+pub use file_diff::structured_diff_for_blobs;
 
 /// Contains all active diff providers. Diff providers are compiled in via features. Currently
 /// only `git` is supported.
@@ -161,6 +192,30 @@ impl DiffProviderRegistry {
                 }
             })
     }
+
+    pub fn get_local_diff_files(&self, cwd: &Path) -> Option<Vec<FileDiff>> {
+        self.providers
+            .iter()
+            .find_map(|provider| match provider.get_local_diff_files(cwd) {
+                Ok(res) => Some(res),
+                Err(err) => {
+                    log::debug!("{err:#?}");
+                    None
+                }
+            })
+    }
+
+    pub fn get_commit_diff_files(&self, cwd: &Path, hash: &str) -> Option<Vec<FileDiff>> {
+        self.providers
+            .iter()
+            .find_map(|provider| match provider.get_commit_diff_files(cwd, hash) {
+                Ok(res) => Some(res),
+                Err(err) => {
+                    log::debug!("{err:#?}");
+                    None
+                }
+            })
+    }
 }
 
 impl Default for DiffProviderRegistry {
@@ -244,6 +299,22 @@ impl DiffProvider {
         match self {
             #[cfg(feature = "git")]
             Self::Git => git::get_git_dir(cwd),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn get_local_diff_files(&self, cwd: &Path) -> Result<Vec<FileDiff>> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::get_local_diff_files(cwd),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    fn get_commit_diff_files(&self, cwd: &Path, hash: &str) -> Result<Vec<FileDiff>> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::get_commit_diff_files(cwd, hash),
             Self::None => bail!("No diff support compiled in"),
         }
     }

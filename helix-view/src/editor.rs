@@ -1078,6 +1078,14 @@ pub struct Editor {
     /// Opaque layer state, managed by the UI layer (helix-term).
     /// Stores the compositor layer stack, downcasted by helix-term.
     pub layer_state: Box<dyn std::any::Any>,
+
+    /// Opaque application state, managed by the UI layer (helix-term).
+    /// Stores the application list (tabs), downcasted by helix-term.
+    pub app_state: Box<dyn std::any::Any>,
+
+    /// Content area computed by the tab bar chrome layer.
+    /// Excludes tab bar and commandline; applications render into this area.
+    pub main_area: Rect,
 }
 
 pub type Motion = Box<dyn Fn(&mut Editor)>;
@@ -1168,6 +1176,8 @@ impl Editor {
             handlers,
             dir_stack: VecDeque::with_capacity(DIR_STACK_CAP),
             layer_state: Box::new(()),
+            app_state: Box::new(()),
+            main_area: Rect::default(),
         }
     }
 
@@ -1556,18 +1566,18 @@ impl Editor {
         doc.language_servers = language_servers;
     }
 
-    /// Close a view by removing it from the tree. If the tree becomes empty,
-    /// remove the tab entirely.
-    pub fn close(&mut self, view_id: ViewId) {
+    /// Close a view by removing it from the tree.
+    /// Returns `true` if the tree became empty (caller should close the tab via TabManager).
+    pub fn close(&mut self, view_id: ViewId) -> bool {
         if self.tabs.is_empty() {
-            return;
+            return false;
         }
         self.tabs[self.active_tab].tree_mut().remove(view_id);
-        // If tree has no views left, remove the tab
         if self.tabs[self.active_tab].tree().views().count() == 0 {
-            self.close_tab(self.active_tab);
+            true
         } else {
             self._refresh();
+            false
         }
     }
 

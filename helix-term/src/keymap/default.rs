@@ -11,12 +11,6 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
         "k" | "up" => move_visual_line_up,
         "l" | "right" => move_char_right,
 
-        "t" => find_till_char,
-        "f" => find_next_char,
-        "T" => till_prev_char,
-        "F" => find_prev_char,
-        "A-." =>  repeat_last_motion,
-
         "home" => goto_line_start,
         "end" => goto_line_end,
 
@@ -52,7 +46,6 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "p" => goto_previous_tab,
             "k" => move_line_up,
             "j" => move_line_down,
-            "w" => goto_word,
         },
         ":" => command_mode,
 
@@ -248,11 +241,6 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
         "A-b" => extend_parent_node_start,
 
 
-        "t" => extend_till_char,
-        "f" => extend_next_char,
-        "T" => extend_till_prev_char,
-        "F" => extend_prev_char,
-
         "home" => extend_to_line_start,
         "end" => extend_to_line_end,
         "esc" => exit_select_mode,
@@ -264,7 +252,6 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "e" => extend_to_last_line,
             "k" => extend_line_up,
             "j" => extend_line_down,
-            "w" => extend_to_word,
         },
     }));
     hashmap!(

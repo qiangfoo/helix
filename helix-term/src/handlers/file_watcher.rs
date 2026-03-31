@@ -2,12 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use helix_core::Rope;
 use helix_event::register_hook;
 use helix_view::document::DiffSource;
 use helix_view::events::{DocumentDidClose, DocumentDidOpen};
 use helix_view::handlers::{FileWatcherCommand, Handlers};
-use helix_view::{AppId, Editor};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc::{self, Sender};
 
@@ -195,65 +193,44 @@ fn dispatch_reloads(paths: Vec<PathBuf>) {
 
 fn dispatch_diff_refreshes() {
     job::dispatch_blocking(move |editor| {
+        use crate::ui::diff_view::{DiffKey, DiffView};
+
         let diff_providers = editor.diff_providers.clone();
 
-        let diff_docs: Vec<(AppId, DiffSource)> = std::iter::once(editor.tabs[editor.active_tab].doc())
-            .filter_map(|doc| doc.diff_source.as_ref().map(|src| (doc.id(), src.clone())))
-            .collect();
+        // Check if the active app is a DiffView with LocalChanges
+        let diff_view_cwd: Option<std::path::PathBuf> = {
+            if let Some(state) = editor.app_state.downcast_ref::<crate::ui::app::AppState>() {
+                state
+                    .apps
+                    .get(state.active)
+                    .and_then(|app| app.as_any().downcast_ref::<DiffView>())
+                    .and_then(|dv| match dv.diff_key() {
+                        DiffKey::LocalChanges => Some(dv.cwd().to_path_buf()),
+                        DiffKey::CommitDiff { .. } => None,
+                    })
+            } else {
+                None
+            }
+        };
 
-        if diff_docs.is_empty() {
-            return;
-        }
-
-        // Regenerate diffs in a blocking background task
-        tokio::task::spawn_blocking(move || {
-            let results: Vec<(AppId, String)> = diff_docs
-                .into_iter()
-                .filter_map(|(id, source)| {
-                    let text = match &source {
-                        DiffSource::LocalChanges { cwd } => {
-                            diff_providers.get_local_diff(cwd).unwrap_or_default()
+        if let Some(cwd) = diff_view_cwd {
+            // Refresh DiffView in background
+            tokio::task::spawn_blocking(move || {
+                let files = diff_providers.get_local_diff_files(&cwd).unwrap_or_default();
+                job::dispatch_blocking(move |editor| {
+                    if let Some(state) = editor.app_state.downcast_mut::<crate::ui::app::AppState>() {
+                        if let Some(app) = state.apps.get_mut(state.active) {
+                            if let Some(dv) = app.as_any_mut().downcast_mut::<DiffView>() {
+                                if matches!(dv.diff_key(), DiffKey::LocalChanges) {
+                                    dv.refresh(files);
+                                }
+                            }
                         }
-                        // CommitDiff doesn't refresh (hash is immutable)
-                        DiffSource::CommitDiff { .. } => return None,
-                    };
-                    Some((id, text))
-                })
-                .collect();
-
-            // Apply results back on the main thread
-            job::dispatch_blocking(move |editor| {
-                let scrolloff = editor.config().scrolloff;
-                for (doc_id, new_text) in results {
-                    apply_diff_update(editor, doc_id, &new_text, scrolloff);
-                }
+                    }
+                });
             });
-        });
-    });
-}
-
-fn apply_diff_update(editor: &mut Editor, doc_id: AppId, new_text: &str, scrolloff: usize) {
-    if editor.tabs[editor.active_tab].doc().id() != doc_id {
-        return;
-    }
-
-    let new_rope = Rope::from(new_text);
-    let transaction = helix_core::diff::compare_ropes(editor.tabs[editor.active_tab].doc().text(), &new_rope);
-    if transaction.changes().is_empty() {
-        return;
-    }
-
-    let view_ids: Vec<_> = editor.tabs[editor.active_tab].doc().selections().keys().cloned().collect();
-    if let Some(&view_id) = view_ids.first() {
-        editor.tabs[editor.active_tab].doc_mut().apply(&transaction, view_id);
-
-        for &vid in &view_ids {
-            let tab = &mut editor.tabs[editor.active_tab];
-            let (doc, tree) = tab.doc_and_tree_mut();
-            let view = tree.get_mut(vid);
-            view.ensure_cursor_in_view(doc, scrolloff);
         }
-    }
+    });
 }
 
 pub fn register_hooks(handlers: &Handlers) {

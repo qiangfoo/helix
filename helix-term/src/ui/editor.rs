@@ -1,5 +1,5 @@
 use crate::{
-    commands::{self, OnKeyCallback, OnKeyCallbackKind},
+    commands,
     compositor::{Component, Context, Event, EventResult},
     events::{OnModeSwitch, PostCommand},
     key,
@@ -8,7 +8,6 @@ use crate::{
         document::{render_document, LinePos, TextRenderer},
         statusline,
         text_decorations::{self, Decoration, DecorationManager, InlineDiagnostics},
-        ProgressSpinners,
     },
 };
 
@@ -37,11 +36,6 @@ pub struct EditorView {
     app_id: crate::ui::app::AppId,
     pub tab_index: usize,
     pub keymaps: Keymaps,
-    on_next_key: Option<(OnKeyCallback, OnKeyCallbackKind)>,
-    pseudo_pending: Vec<KeyEvent>,
-    spinners: ProgressSpinners,
-    /// Tracks if the terminal window is focused by reaction to terminal focus events
-    terminal_focused: bool,
 }
 
 impl EditorView {
@@ -50,15 +44,7 @@ impl EditorView {
             app_id: crate::ui::app::AppId::next(),
             tab_index,
             keymaps,
-            on_next_key: None,
-            pseudo_pending: Vec::new(),
-            spinners: ProgressSpinners::default(),
-            terminal_focused: true,
         }
-    }
-
-    pub fn spinners_mut(&mut self) -> &mut ProgressSpinners {
-        &mut self.spinners
     }
 
     pub fn render_view(
@@ -130,7 +116,7 @@ impl EditorView {
                 view,
                 theme,
                 &config.cursor_shape,
-                self.terminal_focused,
+                true,
             ));
             if let Some(overlay) = Self::highlight_focused_view_elements(view, doc, theme) {
                 overlays.push(overlay);
@@ -145,7 +131,7 @@ impl EditorView {
                 view,
                 view.area,
                 theme,
-                is_focused & self.terminal_focused,
+                is_focused & true,
                 &mut decorations,
             );
         }
@@ -210,8 +196,9 @@ impl EditorView {
             .clip_top(view.area.height.saturating_sub(1))
             .clip_bottom(1); // -1 from bottom to remove commandline
 
+        let default_spinners = crate::ui::ProgressSpinners::default();
         let mut context =
-            statusline::RenderContext::new(editor, doc, view, is_focused, &self.spinners);
+            statusline::RenderContext::new(editor, doc, view, is_focused, &default_spinners);
 
         statusline::render(&mut context, statusline_area, surface);
     }
@@ -827,19 +814,16 @@ impl EditorView {
     }
 
     /// Handle events by looking them up in `self.keymaps`. Returns None
-    /// if event was handled (a command was executed or a subkeymap was
-    /// activated). Only KeymapResult::{NotFound, Cancelled} is returned
-    /// otherwise.
+    /// Handle a keymap lookup result. On Pending, pushes a KeyMenu layer.
+    /// Returns Some(KeymapResult::NotFound) if the key wasn't found.
     fn handle_keymap_event(
-        &mut self,
+        &self,
         mode: Mode,
         cxt: &mut commands::Context,
         event: KeyEvent,
     ) -> Option<KeymapResult> {
         let mut last_mode = mode;
-        self.pseudo_pending.extend(self.keymaps.pending());
         let key_result = self.keymaps.get(mode, event);
-        cxt.editor.autoinfo = self.keymaps.sticky().map(|node| node.infobox());
 
         let mut execute_command = |command: &commands::MappableCommand| {
             command.execute(cxt);
@@ -852,7 +836,6 @@ impl EditorView {
                     new_mode: current_mode,
                     cx: cxt,
                 });
-
             }
 
             last_mode = current_mode;
@@ -862,18 +845,22 @@ impl EditorView {
             KeymapResult::Matched(command) => {
                 execute_command(command);
             }
-            KeymapResult::Pending(node) => cxt.editor.autoinfo = Some(node.infobox()),
+            KeymapResult::Pending(node) => {
+                // Push KeyMenu as overlay for multi-key sequence
+                let menu = crate::ui::key_menu::KeyMenu::new(node.clone());
+                cxt.push_layer(Box::new(menu));
+            }
             KeymapResult::MatchedSequence(commands) => {
                 for command in commands {
                     execute_command(command);
                 }
             }
-            KeymapResult::NotFound | KeymapResult::Cancelled(_) => return Some(key_result),
+            KeymapResult::NotFound => return Some(key_result),
         }
         None
     }
 
-    fn command_mode(&mut self, mode: Mode, cxt: &mut commands::Context, event: KeyEvent) {
+    fn command_mode(&self, mode: Mode, cxt: &mut commands::Context, event: KeyEvent) {
         let tab_count = cxt.editor.tabs[cxt.editor.active_tab].count();
         match (event, tab_count) {
             // If the count is already started and the input is a number, always continue the count.
@@ -893,17 +880,13 @@ impl EditorView {
             _ => {
                 // set the count
                 cxt.count = cxt.editor.tabs[cxt.editor.active_tab].count();
-                // TODO: edge case: 0j -> reset to 1
-                // if this fails, count was Some(0)
-                // debug_assert!(cxt.count != 0);
 
                 let res = self.handle_keymap_event(mode, cxt, event);
                 if matches!(&res, Some(KeymapResult::NotFound)) {
-                    self.on_next_key(OnKeyCallbackKind::Fallback, cxt, event);
+                    // Not found — let it propagate to the global handler
                 }
-                if self.keymaps.pending().is_empty() {
-                    cxt.editor.tabs[cxt.editor.active_tab].set_count(None)
-                }
+                // Always clear count after keymap processing
+                cxt.editor.tabs[cxt.editor.active_tab].set_count(None);
             }
         }
     }
@@ -919,21 +902,9 @@ impl EditorView {
     /// must be called whenever the editor processed input that
     /// is not a `KeyEvent`. In these cases any pending keys/on next
     /// key callbacks must be canceled.
-    fn handle_non_key_input(&mut self, cxt: &mut commands::Context) {
+    fn handle_non_key_input(&self, cxt: &mut commands::Context) {
         cxt.editor.status_msg = None;
         cxt.editor.reset_idle_timer();
-        // HACKS: create a fake key event that will never trigger any actual map
-        // and therefore simply acts as "dismiss"
-        let null_key_event = KeyEvent {
-            code: KeyCode::Null,
-            modifiers: KeyModifiers::empty(),
-        };
-        // dismiss any pending keys
-        if let Some((on_next_key, _)) = self.on_next_key.take() {
-            on_next_key(cxt, null_key_event);
-        }
-        self.handle_keymap_event(cxt.editor.mode(), cxt, null_key_event);
-        self.pseudo_pending.clear();
     }
 
     fn handle_mouse_event(
@@ -1100,24 +1071,6 @@ impl EditorView {
             _ => EventResult::Ignored(None),
         }
     }
-    fn on_next_key(
-        &mut self,
-        kind: OnKeyCallbackKind,
-        ctx: &mut commands::Context,
-        event: KeyEvent,
-    ) -> bool {
-        if let Some((on_next_key, kind_)) = self.on_next_key.take() {
-            if kind == kind_ {
-                on_next_key(ctx, event);
-                true
-            } else {
-                self.on_next_key = Some((on_next_key, kind_));
-                false
-            }
-        } else {
-            false
-        }
-    }
 }
 
 impl Component for EditorView {
@@ -1133,7 +1086,6 @@ impl Component for EditorView {
             editor: context.editor,
             count: None,
             callback: Vec::new(),
-            on_next_key_callback: None,
             jobs: context.jobs,
         };
 
@@ -1156,17 +1108,8 @@ impl Component for EditorView {
 
                 let mode = cx.editor.mode();
 
-                if !self.on_next_key(OnKeyCallbackKind::PseudoPending, &mut cx, key) {
-                    self.command_mode(mode, &mut cx, key);
-                }
+                self.command_mode(mode, &mut cx, key);
 
-                self.on_next_key = cx.on_next_key_callback.take();
-                match self.on_next_key {
-                    Some((_, OnKeyCallbackKind::PseudoPending)) => self.pseudo_pending.push(key),
-                    _ => self.pseudo_pending.clear(),
-                }
-
-                // appease borrowck
                 let callbacks = take(&mut cx.callback);
 
                 // if the command consumed the last view, skip the render.
@@ -1197,22 +1140,14 @@ impl Component for EditorView {
 
             Event::Mouse(event) => self.handle_mouse_event(event, &mut cx),
             Event::IdleTimeout => self.handle_idle_timeout(&mut cx),
-            Event::FocusGained => {
-                self.terminal_focused = true;
-                EventResult::Consumed(None)
-            }
-            Event::FocusLost => {
-                self.terminal_focused = false;
-                EventResult::Consumed(None)
-            }
+            Event::FocusGained => EventResult::Consumed(None),
+            Event::FocusLost => EventResult::Consumed(None),
         };
 
         result
     }
 
     fn render(&mut self, area: Rect, surface: &mut Surface, cx: &mut Context) {
-        let config = cx.editor.config();
-
         // Resize our tree to match the given area
         cx.editor.tabs[self.tab_index].tree_mut().resize(area);
 
@@ -1221,12 +1156,7 @@ impl Component for EditorView {
             self.render_view(cx.editor, cx.editor.tabs[self.tab_index].doc(), view, area, surface, is_focused);
         }
 
-        if config.auto_info {
-            if let Some(mut info) = cx.editor.autoinfo.take() {
-                info.render(area, surface, cx);
-                cx.editor.autoinfo = Some(info)
-            }
-        }
+        // autoinfo popup (space menu, etc.) is rendered by TabManager
     }
 
     fn cursor(&self, _area: Rect, editor: &Editor) -> (Option<Position>, CursorKind) {
@@ -1242,14 +1172,7 @@ impl Component for EditorView {
         });
         match (pos, CursorKind::Block) {
             // all block cursors are drawn manually
-            (pos, CursorKind::Block) => {
-                if self.terminal_focused {
-                    (pos, CursorKind::Hidden)
-                } else {
-                    // use terminal cursor when terminal loses focus
-                    (pos, CursorKind::Underline)
-                }
-            }
+            (pos, CursorKind::Block) => (pos, CursorKind::Hidden),
             cursor => cursor,
         }
     }
@@ -1296,14 +1219,8 @@ impl crate::ui::app::Application for EditorView {
     }
 
     fn pending_keys(&self) -> String {
-        let mut disp = String::new();
-        for key in self.keymaps.pending() {
-            disp.push_str(&key.key_sequence_format());
-        }
-        for key in &self.pseudo_pending {
-            disp.push_str(&key.key_sequence_format());
-        }
-        disp
+        // Pending keys are now shown by the KeyMenu overlay when active
+        String::new()
     }
 
     fn icon_path(&self, editor: &Editor) -> Option<PathBuf> {
@@ -1311,7 +1228,7 @@ impl crate::ui::app::Application for EditorView {
     }
 }
 
-fn canonicalize_key(key: &mut KeyEvent) {
+pub fn canonicalize_key(key: &mut KeyEvent) {
     if let KeyEvent {
         code: KeyCode::Char(_),
         modifiers: _,

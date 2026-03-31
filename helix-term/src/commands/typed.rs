@@ -114,7 +114,10 @@ fn open_impl(cx: &mut compositor::Context, args: Args, action: Action) -> anyhow
             )?;
             let callback = crate::job::Callback::Editor(Box::new(
                 move |editor: &mut Editor| {
-                    crate::ui::TabManager::add_editor_tab(editor, doc);
+                    {
+                        use crate::ui::EditorApps;
+                        editor.add_editor_app(doc);
+                    }
                 },
             ));
             cx.jobs.callback(async { Ok(callback) });
@@ -131,7 +134,13 @@ fn tab_next(
     if event != PromptEvent::Validate {
         return Ok(());
     }
-    cx.editor.next_tab();
+    let callback = crate::job::Callback::Editor(Box::new(|editor: &mut helix_view::Editor| {
+        {
+            use crate::ui::EditorApps;
+            editor.next_app();
+        }
+    }));
+    cx.jobs.callback(async { Ok(callback) });
     Ok(())
 }
 
@@ -143,7 +152,13 @@ fn tab_previous(
     if event != PromptEvent::Validate {
         return Ok(());
     }
-    cx.editor.prev_tab();
+    let callback = crate::job::Callback::Editor(Box::new(|editor: &mut helix_view::Editor| {
+        {
+            use crate::ui::EditorApps;
+            editor.prev_app();
+        }
+    }));
+    cx.jobs.callback(async { Ok(callback) });
     Ok(())
 }
 
@@ -156,8 +171,13 @@ fn tab_close(
         return Ok(());
     }
     crate::session::save_session(cx.editor);
-    let index = cx.editor.active_tab;
-    cx.editor.close_tab(index);
+    let callback = crate::job::Callback::Editor(Box::new(|editor: &mut helix_view::Editor| {
+        {
+            use crate::ui::EditorApps;
+            editor.close_active_app();
+        }
+    }));
+    cx.jobs.callback(async { Ok(callback) });
     Ok(())
 }
 
@@ -169,13 +189,8 @@ fn tab_close_others(
     if event != PromptEvent::Validate {
         return Ok(());
     }
-    let active = cx.editor.active_tab;
-    let count = cx.editor.tab_count();
-    for i in (0..count).rev() {
-        if i != active {
-            cx.editor.close_tab(i);
-        }
-    }
+    use crate::ui::EditorApps;
+    cx.editor.close_other_apps();
     Ok(())
 }
 
@@ -187,9 +202,9 @@ fn tab_close_all(
     if event != PromptEvent::Validate {
         return Ok(());
     }
+    use crate::ui::EditorApps;
     crate::session::save_session(cx.editor);
-    cx.editor.tabs.clear();
-    cx.editor.active_tab = 0;
+    cx.editor.close_all_apps();
     Ok(())
 }
 
@@ -203,7 +218,10 @@ fn new_file(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> an
     let doc = Document::default(cx.editor.config.clone(), cx.editor.syn_loader.clone());
     let callback = crate::job::Callback::Editor(Box::new(
         move |editor: &mut Editor| {
-            crate::ui::TabManager::add_editor_tab(editor, doc);
+            {
+                        use crate::ui::EditorApps;
+                        editor.add_editor_app(doc);
+                    }
         },
     ));
     cx.jobs.callback(async { Ok(callback) });
@@ -1124,7 +1142,10 @@ fn vsplit_new(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> 
     let doc = Document::default(cx.editor.config.clone(), cx.editor.syn_loader.clone());
     let callback = crate::job::Callback::Editor(Box::new(
         move |editor: &mut Editor| {
-            crate::ui::TabManager::add_editor_tab(editor, doc);
+            {
+                        use crate::ui::EditorApps;
+                        editor.add_editor_app(doc);
+                    }
         },
     ));
     cx.jobs.callback(async { Ok(callback) });
@@ -1141,7 +1162,10 @@ fn hsplit_new(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> 
     let doc = Document::default(cx.editor.config.clone(), cx.editor.syn_loader.clone());
     let callback = crate::job::Callback::Editor(Box::new(
         move |editor: &mut Editor| {
-            crate::ui::TabManager::add_editor_tab(editor, doc);
+            {
+                        use crate::ui::EditorApps;
+                        editor.add_editor_app(doc);
+                    }
         },
     ));
     cx.jobs.callback(async { Ok(callback) });
@@ -1166,7 +1190,10 @@ fn tutor(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> anyho
     doc.set_path(None);
     let callback = crate::job::Callback::Editor(Box::new(
         move |editor: &mut Editor| {
-            crate::ui::TabManager::add_editor_tab(editor, doc);
+            {
+                        use crate::ui::EditorApps;
+                        editor.add_editor_app(doc);
+                    }
         },
     ));
     cx.jobs.callback(async { Ok(callback) });
@@ -1479,7 +1506,10 @@ fn open_config(
     )?;
     let callback = crate::job::Callback::Editor(Box::new(
         move |editor: &mut Editor| {
-            crate::ui::TabManager::add_editor_tab(editor, doc);
+            {
+                        use crate::ui::EditorApps;
+                        editor.add_editor_app(doc);
+                    }
         },
     ));
     cx.jobs.callback(async { Ok(callback) });
@@ -1505,7 +1535,10 @@ fn open_workspace_config(
     )?;
     let callback = crate::job::Callback::Editor(Box::new(
         move |editor: &mut Editor| {
-            crate::ui::TabManager::add_editor_tab(editor, doc);
+            {
+                        use crate::ui::EditorApps;
+                        editor.add_editor_app(doc);
+                    }
         },
     ));
     cx.jobs.callback(async { Ok(callback) });
@@ -1527,7 +1560,10 @@ fn open_log(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> an
     )?;
     let callback = crate::job::Callback::Editor(Box::new(
         move |editor: &mut Editor| {
-            crate::ui::TabManager::add_editor_tab(editor, doc);
+            {
+                        use crate::ui::EditorApps;
+                        editor.add_editor_app(doc);
+                    }
         },
     ));
     cx.jobs.callback(async { Ok(callback) });

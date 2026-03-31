@@ -17,7 +17,7 @@ use gix::status::{
     UntrackedFiles,
 };
 use gix::{Commit, ObjectId, Repository, ThreadSafeRepository};
-use crate::{CommitInfo, FileChange};
+use crate::{CommitInfo, FileChange, FileDiff};
 
 #[cfg(test)]
 mod test;
@@ -628,4 +628,239 @@ pub fn get_local_diff(cwd: &Path) -> Result<String> {
     }
 
     Ok(output)
+}
+
+/// Generate structured per-file diffs for local working tree changes vs HEAD.
+pub fn get_local_diff_files(cwd: &Path) -> Result<Vec<FileDiff>> {
+    let repo = open_repo(cwd)?.to_thread_local();
+    let work_dir = repo
+        .workdir()
+        .context("no working tree")?
+        .to_path_buf();
+    let head = repo.head_commit()?;
+
+    let changes = std::cell::RefCell::new(Vec::new());
+    status(&repo, |change| {
+        if let Ok(change) = change {
+            changes.borrow_mut().push(change);
+        }
+        true
+    })?;
+    let changes = changes.into_inner();
+
+    let mut files = Vec::new();
+    for change in &changes {
+        let result: Result<()> = (|| {
+            match change {
+                FileChange::Modified { path } | FileChange::Conflict { path } => {
+                    let old_oid = find_file_in_commit(&repo, &head, path)?;
+                    let old_blob = repo.find_object(old_oid)?.detach().data;
+                    let new_blob = std::fs::read(path)?;
+                    let rel = path.strip_prefix(&work_dir).unwrap_or(path);
+                    let hunks = crate::structured_diff_for_blobs(&old_blob, &new_blob);
+                    if !hunks.is_empty() {
+                        files.push(FileDiff {
+                            path: rel.to_string_lossy().into_owned(),
+                            change_kind: 'M',
+                            hunks,
+                        });
+                    }
+                }
+                FileChange::Untracked { path } => {
+                    let new_blob = std::fs::read(path)?;
+                    let rel = path.strip_prefix(&work_dir).unwrap_or(path);
+                    let hunks = crate::structured_diff_for_blobs(&[], &new_blob);
+                    if !hunks.is_empty() {
+                        files.push(FileDiff {
+                            path: rel.to_string_lossy().into_owned(),
+                            change_kind: 'A',
+                            hunks,
+                        });
+                    }
+                }
+                FileChange::Deleted { path } => {
+                    let old_oid = find_file_in_commit(&repo, &head, path)?;
+                    let old_blob = repo.find_object(old_oid)?.detach().data;
+                    let rel = path.strip_prefix(&work_dir).unwrap_or(path);
+                    let hunks = crate::structured_diff_for_blobs(&old_blob, &[]);
+                    if !hunks.is_empty() {
+                        files.push(FileDiff {
+                            path: rel.to_string_lossy().into_owned(),
+                            change_kind: 'D',
+                            hunks,
+                        });
+                    }
+                }
+                FileChange::Renamed { from_path, to_path } => {
+                    let old_oid = find_file_in_commit(&repo, &head, from_path)?;
+                    let old_blob = repo.find_object(old_oid)?.detach().data;
+                    let new_blob = std::fs::read(to_path)?;
+                    let new_rel = to_path.strip_prefix(&work_dir).unwrap_or(to_path);
+                    let hunks = crate::structured_diff_for_blobs(&old_blob, &new_blob);
+                    files.push(FileDiff {
+                        path: new_rel.to_string_lossy().into_owned(),
+                        change_kind: 'R',
+                        hunks,
+                    });
+                }
+            }
+            Ok(())
+        })();
+        if let Err(e) = result {
+            log::debug!("Error generating structured diff for file: {e:#}");
+        }
+    }
+
+    Ok(files)
+}
+
+/// Generate structured per-file diffs for a commit vs its parent.
+pub fn get_commit_diff_files(cwd: &Path, commit_hash: &str) -> Result<Vec<FileDiff>> {
+    let repo = open_repo(cwd)?.to_thread_local();
+    let oid = gix::ObjectId::from_hex(commit_hash.as_bytes())?;
+    let commit = repo.find_commit(oid)?;
+    let tree = commit.tree()?;
+
+    let parent_tree = commit
+        .parent_ids()
+        .next()
+        .and_then(|pid| pid.object().ok())
+        .and_then(|obj| obj.into_commit().tree().ok());
+
+    let mut files = Vec::new();
+    diff_trees_structured(&repo, parent_tree.as_ref(), &tree, "", &mut files)?;
+    Ok(files)
+}
+
+fn diff_trees_structured(
+    repo: &Repository,
+    old_tree: Option<&gix::Tree<'_>>,
+    new_tree: &gix::Tree<'_>,
+    prefix: &str,
+    files: &mut Vec<FileDiff>,
+) -> Result<()> {
+    let old_entries = match old_tree {
+        Some(t) => collect_tree_entries(t)?,
+        None => std::collections::BTreeMap::new(),
+    };
+    let new_entries = collect_tree_entries(new_tree)?;
+
+    let mut all_paths: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for k in old_entries.keys() {
+        all_paths.insert(k.as_str());
+    }
+    for k in new_entries.keys() {
+        all_paths.insert(k.as_str());
+    }
+
+    for name in all_paths {
+        let path = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        };
+
+        let old_entry = old_entries.get(name);
+        let new_entry = new_entries.get(name);
+
+        match (old_entry, new_entry) {
+            (Some(&(EntryKind::Tree, old_oid)), Some(&(EntryKind::Tree, new_oid))) => {
+                if old_oid != new_oid {
+                    let old_t = repo.find_object(old_oid)?.into_tree();
+                    let new_t = repo.find_object(new_oid)?.into_tree();
+                    diff_trees_structured(repo, Some(&old_t), &new_t, &path, files)?;
+                }
+            }
+            (None, Some(&(EntryKind::Tree, new_oid))) => {
+                let new_t = repo.find_object(new_oid)?.into_tree();
+                diff_trees_structured(repo, None, &new_t, &path, files)?;
+            }
+            (Some(&(EntryKind::Tree, old_oid)), None) => {
+                let old_t = repo.find_object(old_oid)?.into_tree();
+                diff_deleted_tree_structured(repo, &old_t, &path, files)?;
+            }
+            (Some(&(_, old_oid)), Some(&(_, new_oid)))
+                if matches!(
+                    old_entries.get(name).map(|e| e.0),
+                    Some(EntryKind::Blob | EntryKind::BlobExecutable)
+                ) && matches!(
+                    new_entries.get(name).map(|e| e.0),
+                    Some(EntryKind::Blob | EntryKind::BlobExecutable)
+                ) =>
+            {
+                if old_oid != new_oid {
+                    let old_blob = repo.find_object(old_oid)?.detach().data;
+                    let new_blob = repo.find_object(new_oid)?.detach().data;
+                    let hunks = crate::structured_diff_for_blobs(&old_blob, &new_blob);
+                    if !hunks.is_empty() {
+                        files.push(FileDiff {
+                            path: path.clone(),
+                            change_kind: 'M',
+                            hunks,
+                        });
+                    }
+                }
+            }
+            (None, Some(&(kind, new_oid)))
+                if matches!(kind, EntryKind::Blob | EntryKind::BlobExecutable) =>
+            {
+                let new_blob = repo.find_object(new_oid)?.detach().data;
+                let hunks = crate::structured_diff_for_blobs(&[], &new_blob);
+                if !hunks.is_empty() {
+                    files.push(FileDiff {
+                        path: path.clone(),
+                        change_kind: 'A',
+                        hunks,
+                    });
+                }
+            }
+            (Some(&(kind, old_oid)), None)
+                if matches!(kind, EntryKind::Blob | EntryKind::BlobExecutable) =>
+            {
+                let old_blob = repo.find_object(old_oid)?.detach().data;
+                let hunks = crate::structured_diff_for_blobs(&old_blob, &[]);
+                if !hunks.is_empty() {
+                    files.push(FileDiff {
+                        path: path.clone(),
+                        change_kind: 'D',
+                        hunks,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn diff_deleted_tree_structured(
+    repo: &Repository,
+    tree: &gix::Tree<'_>,
+    prefix: &str,
+    files: &mut Vec<FileDiff>,
+) -> Result<()> {
+    for entry in tree.iter() {
+        let entry = entry?;
+        let name = entry.filename().to_string();
+        let path = format!("{prefix}/{name}");
+        match entry.mode().kind() {
+            EntryKind::Tree => {
+                let sub = repo.find_object(entry.object_id())?.into_tree();
+                diff_deleted_tree_structured(repo, &sub, &path, files)?;
+            }
+            EntryKind::Blob | EntryKind::BlobExecutable => {
+                let old_blob = repo.find_object(entry.object_id())?.detach().data;
+                let hunks = crate::structured_diff_for_blobs(&old_blob, &[]);
+                if !hunks.is_empty() {
+                    files.push(FileDiff {
+                        path: path.clone(),
+                        change_kind: 'D',
+                        hunks,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }

@@ -25,7 +25,7 @@ use crate::{
     handlers,
     job::Jobs,
     layers::EditorLayers,
-    ui::{self, overlay::overlaid},
+    ui::{self, overlay::overlaid, EditorApps},
 };
 
 use log::{error, info, warn};
@@ -40,6 +40,9 @@ use anyhow::{Context, Error};
 
 #[cfg(not(windows))]
 use {signal_hook::consts::signal, signal_hook_tokio::Signals};
+
+// TODO: Move spinners to Editor for proper LSP progress tracking.
+// For now, spinner operations are no-ops after EditorView was stripped of state.
 #[cfg(windows)]
 type Signals = futures_util::stream::Empty<()>;
 
@@ -137,9 +140,10 @@ impl Application {
         Self::load_configured_theme(&mut editor, &config.load(), &mut terminal, theme_mode);
 
         editor.init_layers(area);
+        editor.init_apps(Arc::clone(&config));
         let tab_manager = ui::TabManager::new(Arc::clone(&config));
-        // Initial tab will be created after files are opened below.
         editor.push_layer(Box::new(tab_manager));
+        editor.push_layer(Box::new(ui::ActiveAppProxy));
 
         let jobs = Jobs::new();
 
@@ -224,15 +228,16 @@ impl Application {
 
         // Add all documents as tabs
         for doc in docs_to_open {
-            ui::TabManager::add_editor_tab(&mut editor, doc);
+            editor.add_editor_app(doc);
         }
         if editor.tab_count() > 0 {
-            let tm = editor.find_layer::<ui::TabManager>().unwrap();
-            tm.activate_tab(0);
+            editor.switch_app(0);
             editor.active_tab = 0;
         } else {
-            let tm = editor.find_layer::<ui::TabManager>().unwrap();
-            tm.ensure_welcome_tab();
+            // Ensure a welcome page if nothing was opened
+            if editor.app_count() == 0 {
+                editor.add_app(Box::new(ui::welcome::WelcomePage::new()));
+            }
         }
 
         // Push the picker on top if needed
@@ -801,9 +806,7 @@ impl Application {
                                 } else {
                                     self.lsp_progress.end_progress(server_id, &token);
                                     if !self.lsp_progress.is_progressing(server_id) {
-                                        let tm = self.editor.find_layer::<ui::TabManager>().expect("expected TabManager");
-                                        let ev = tm.editor_view().expect("expected at least one EditorView");
-                                        ev.spinners_mut().get_or_create(server_id).stop();
+                                        // TODO: spinner stop (spinners to be moved to Editor)
                                     }
                                     self.editor.clear_status();
 
@@ -847,9 +850,7 @@ impl Application {
                             lsp::WorkDoneProgress::End(_) => {
                                 self.lsp_progress.end_progress(server_id, &token);
                                 if !self.lsp_progress.is_progressing(server_id) {
-                                    let tm = self.editor.find_layer::<ui::TabManager>().expect("expected TabManager");
-                                    let ev = tm.editor_view().expect("expected at least one EditorView");
-                                    ev.spinners_mut().get_or_create(server_id).stop();
+                                    // TODO: spinner stop (spinners to be moved to Editor)
                                 };
                             }
                         }
@@ -915,17 +916,7 @@ impl Application {
                     Ok(MethodCall::WorkDoneProgressCreate(params)) => {
                         self.lsp_progress.create(server_id, params.token);
 
-                        let tab_manager = self
-                            .editor
-                            .find_layer::<ui::TabManager>()
-                            .expect("expected TabManager");
-                        let editor_view = tab_manager
-                            .editor_view()
-                            .expect("expected at least one EditorView");
-                        let spinner = editor_view.spinners_mut().get_or_create(server_id);
-                        if spinner.is_stopped() {
-                            spinner.start();
-                        }
+                        // TODO: spinner start (spinners to be moved to Editor)
 
                         Ok(serde_json::Value::Null)
                     }
@@ -1158,7 +1149,7 @@ impl Application {
         };
 
         // Add the document as a new tab
-        ui::TabManager::add_editor_tab(&mut self.editor, doc);
+        self.editor.add_editor_app(doc);
 
         if let Some(range) = selection {
             let (view, doc) = current!(self.editor);

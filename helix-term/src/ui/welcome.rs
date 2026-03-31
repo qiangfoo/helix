@@ -24,16 +24,8 @@ impl WelcomePage {
         }
     }
 
-    fn handle_key_event(&mut self, key: KeyEvent, ctx: &mut Context) -> EventResult {
+    fn handle_key_event(&mut self, key: KeyEvent, _ctx: &mut Context) -> EventResult {
         match key {
-            // ':' opens the command prompt
-            KeyEvent {
-                code: KeyCode::Char(':'),
-                ..
-            } => {
-                let callback = crate::commands::typed::command_mode_callback(ctx.editor);
-                EventResult::Consumed(Some(callback))
-            }
             // 'f' opens file picker
             KeyEvent {
                 code: KeyCode::Char('f'),

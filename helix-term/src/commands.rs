@@ -22,26 +22,23 @@ use helix_core::{
     command_line,
     doc_formatter::TextFormat,
     encoding, find_workspace,
-    graphemes::{self, next_grapheme_boundary},
+    graphemes,
     indent,
     line_ending::line_end_char_index,
     match_brackets,
     movement::{self, move_vertically_visual, Direction},
     object,
     regex,
-    search::{self},
     syntax::config::LanguageServerFeature,
-    text_annotations::{Overlay, TextAnnotations},
+    text_annotations::TextAnnotations,
     textobject,
-    visual_offset_from_block, Range, Rope, RopeReader, RopeSlice,
-    Selection, SmallVec, Tendril,
+    visual_offset_from_block, Range, RopeReader, RopeSlice,
+    Selection, SmallVec,
 };
 use helix_view::{
-    document::{DiffSource, Mode, SCRATCH_BUFFER_NAME},
-    editor::{Action, Motion},
-    info::Info,
+    document::{Mode, SCRATCH_BUFFER_NAME},
+    editor::Action,
     input::KeyEvent,
-    keyboard::KeyCode,
     theme::Style,
     tree,
     view::View,
@@ -82,19 +79,11 @@ use grep_regex::RegexMatcherBuilder;
 use grep_searcher::{sinks, BinaryDetection, SearcherBuilder};
 use ignore::{DirEntry, WalkBuilder, WalkState};
 
-pub type OnKeyCallback = Box<dyn FnOnce(&mut Context, KeyEvent)>;
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
-pub enum OnKeyCallbackKind {
-    PseudoPending,
-    Fallback,
-}
-
 pub struct Context<'a> {
     pub count: Option<NonZeroUsize>,
     pub editor: &'a mut Editor,
 
     pub callback: Vec<crate::compositor::Callback>,
-    pub on_next_key_callback: Option<(OnKeyCallback, OnKeyCallbackKind)>,
     pub jobs: &'a mut Jobs,
 }
 
@@ -115,26 +104,6 @@ impl Context<'_> {
                 use crate::layers::EditorLayers;
                 editor.replace_or_push_layer(id, component);
             }));
-    }
-
-    #[inline]
-    pub fn on_next_key(
-        &mut self,
-        on_next_key_callback: impl FnOnce(&mut Context, KeyEvent) + 'static,
-    ) {
-        self.on_next_key_callback = Some((
-            Box::new(on_next_key_callback),
-            OnKeyCallbackKind::PseudoPending,
-        ));
-    }
-
-    #[inline]
-    pub fn on_next_key_fallback(
-        &mut self,
-        on_next_key_callback: impl FnOnce(&mut Context, KeyEvent) + 'static,
-    ) {
-        self.on_next_key_callback =
-            Some((Box::new(on_next_key_callback), OnKeyCallbackKind::Fallback));
     }
 
     #[inline]
@@ -323,15 +292,6 @@ impl MappableCommand {
         extend_prev_sub_word_end, "Extend to end of prev sub word",
         extend_parent_node_end, "Extend to end of the parent node",
         extend_parent_node_start, "Extend to beginning of the parent node",
-        find_till_char, "Move till next occurrence of char",
-        find_next_char, "Move to next occurrence of char",
-        extend_till_char, "Extend till next occurrence of char",
-        extend_next_char, "Extend to next occurrence of char",
-        till_prev_char, "Move till previous occurrence of char",
-        find_prev_char, "Move to previous occurrence of char",
-        extend_till_prev_char, "Extend till previous occurrence of char",
-        extend_prev_char, "Extend to previous occurrence of char",
-        repeat_last_motion, "Repeat last motion",
         page_up, "Move page up",
         page_down, "Move page down",
         half_page_up, "Move half page up",
@@ -484,8 +444,6 @@ impl MappableCommand {
         goto_prev_paragraph, "Goto previous paragraph",
         suspend, "Suspend and return to shell",
         command_palette, "Open command palette",
-        goto_word, "Jump to a two-character label",
-        extend_to_word, "Extend to a two-character label",
     );
 }
 
@@ -1208,7 +1166,10 @@ fn open_path_as_tab(cx: &mut Context, path: PathBuf) {
     ) {
         Ok(doc) => {
             let callback: crate::compositor::Callback = Box::new(move |editor: &mut Editor| {
-                crate::ui::TabManager::add_editor_tab(editor, doc);
+                {
+                    use crate::ui::EditorApps;
+                    editor.add_editor_app(doc);
+                }
             });
             cx.callback.push(callback);
         }
@@ -1318,164 +1279,6 @@ fn extend_prev_sub_word_end(cx: &mut Context) {
 
 fn extend_next_sub_word_end(cx: &mut Context) {
     extend_word_impl(cx, movement::move_next_sub_word_end)
-}
-
-/// Separate branch to find_char designed only for `<ret>` char.
-//
-// This is necessary because the one document can have different line endings inside. And we
-// cannot predict what character to find when <ret> is pressed. On the current line it can be `lf`
-// but on the next line it can be `crlf`. That's why [`find_char_impl`] cannot be applied here.
-fn find_char_line_ending_motion(
-    editor: &mut Editor,
-    count: usize,
-    direction: Direction,
-    inclusive: bool,
-    extend: bool,
-) {
-    let (view, doc) = current!(editor);
-    let text = doc.text().slice(..);
-
-    let selection = doc.selection(view.id).clone().transform(|range| {
-        let cursor_anchor = range.cursor(text);
-        let cursor_head = next_grapheme_boundary(text, cursor_anchor);
-        let cursor_line = range.cursor_line(text);
-
-        let pos = match direction {
-            Direction::Forward => {
-                let line_end = line_end_char_index(&text, cursor_line);
-                let on_edge = if inclusive {
-                    line_end == cursor_anchor
-                } else {
-                    line_end == cursor_head || line_end == cursor_anchor
-                };
-                let line = cursor_line + count - 1 + on_edge as usize;
-                if line >= text.len_lines() - 1 {
-                    return range;
-                }
-                line_end_char_index(&text, line) - !inclusive as usize
-            }
-            Direction::Backward => {
-                if inclusive {
-                    let line = cursor_line as isize - count as isize;
-                    if line < 0 {
-                        return range;
-                    }
-                    line_end_char_index(&text, line as usize)
-                } else {
-                    let on_edge = text.line_to_char(cursor_line) == cursor_anchor;
-                    let line = cursor_line as isize - count as isize + 1 - on_edge as isize;
-                    if line <= 0 {
-                        return range;
-                    }
-                    text.line_to_char(line as usize)
-                }
-            }
-        };
-
-        if extend {
-            range.put_cursor(text, pos, true)
-        } else {
-            Range::point(range.cursor(text)).put_cursor(text, pos, true)
-        }
-    });
-    doc.set_selection(view.id, selection);
-}
-
-fn find_char(cx: &mut Context, direction: Direction, inclusive: bool, extend: bool) {
-    // TODO: count is reset to 1 before next key so we move it into the closure here.
-    // Would be nice to carry over.
-    let count = cx.count();
-
-    // need to wait for next key
-    // TODO: should this be done by grapheme rather than char?  For example,
-    // we can't properly handle the line-ending CRLF case here in terms of char.
-    cx.on_next_key(move |cx, event| {
-        let motion: Motion = if event.code == KeyCode::Enter {
-            Box::new(move |editor: &mut Editor| {
-                find_char_line_ending_motion(editor, count, direction, inclusive, extend);
-            })
-        } else if let Some(ch) = match event.code {
-            KeyCode::Tab => Some('\t'),
-            KeyCode::Char(ch) => Some(ch),
-            _ => None,
-        } {
-            Box::new(move |editor: &mut Editor| {
-                let (view, doc) = current!(editor);
-                let text = doc.text().slice(..);
-
-                let selection = doc.selection(view.id).clone().transform(|range| {
-                    let cursor_anchor = range.cursor(text);
-                    let cursor_head = next_grapheme_boundary(text, cursor_anchor);
-
-                    // Exclusive search skips the next char after cursor to enable repeated application
-                    let search_start_pos = match (inclusive, direction) {
-                        (true, Direction::Forward) => cursor_head,
-                        (true, Direction::Backward) => cursor_anchor,
-                        (false, Direction::Forward) => cursor_head + 1,
-                        (false, Direction::Backward) => cursor_anchor - 1,
-                    };
-
-                    search::find_nth_char(count, text, ch, search_start_pos, direction)
-                        // Exclusive search should stop on previous character
-                        .map(|pos| match (inclusive, direction) {
-                            (true, Direction::Forward) => pos,
-                            (true, Direction::Backward) => pos,
-                            (false, Direction::Forward) => pos - 1,
-                            (false, Direction::Backward) => pos + 1,
-                        })
-                        .map_or(range, |pos| {
-                            if extend {
-                                range.put_cursor(text, pos, true)
-                            } else {
-                                Range::point(range.cursor(text)).put_cursor(text, pos, true)
-                            }
-                        })
-                });
-
-                doc.set_selection(view.id, selection);
-            })
-        } else {
-            return;
-        };
-
-        cx.editor.apply_motion(motion);
-    })
-}
-
-fn find_till_char(cx: &mut Context) {
-    find_char(cx, Direction::Forward, false, false);
-}
-
-fn find_next_char(cx: &mut Context) {
-    find_char(cx, Direction::Forward, true, false)
-}
-
-fn extend_till_char(cx: &mut Context) {
-    find_char(cx, Direction::Forward, false, true)
-}
-
-fn extend_next_char(cx: &mut Context) {
-    find_char(cx, Direction::Forward, true, true)
-}
-
-fn till_prev_char(cx: &mut Context) {
-    find_char(cx, Direction::Backward, false, false)
-}
-
-fn find_prev_char(cx: &mut Context) {
-    find_char(cx, Direction::Backward, true, false)
-}
-
-fn extend_till_prev_char(cx: &mut Context) {
-    find_char(cx, Direction::Backward, false, true)
-}
-
-fn extend_prev_char(cx: &mut Context) {
-    find_char(cx, Direction::Backward, true, true)
-}
-
-fn repeat_last_motion(cx: &mut Context) {
-    cx.editor.repeat_last_motion(cx.count())
 }
 
 pub fn scroll(cx: &mut Context, offset: usize, direction: Direction, sync_cursor: bool) {
@@ -2154,7 +1957,10 @@ fn global_search(cx: &mut Context) {
                 Ok(doc) => {
                     let callback = crate::job::Callback::Editor(Box::new(
                         move |editor: &mut Editor| {
-                            crate::ui::TabManager::add_editor_tab(editor, doc);
+                            {
+                    use crate::ui::EditorApps;
+                    editor.add_editor_app(doc);
+                }
                         },
                     ));
                     cx.jobs.callback(async { Ok(callback) });
@@ -2489,39 +2295,24 @@ fn buffer_picker(cx: &mut Context) {
         is_active: bool,
     }
 
-    // Gather tab metadata via a compositor callback so we can access TabManager
+    // Gather tab metadata from app_state
     cx.callback.push(Box::new(
         |editor: &mut Editor| {
             use crate::layers::EditorLayers;
-            // Take layers out to avoid borrow conflicts
-            let mut layer_box = std::mem::replace(&mut editor.layer_state, Box::new(()));
             let mut items: Vec<TabMeta> = Vec::new();
-            {
-                let ls = layer_box
-                    .downcast_mut::<crate::layers::LayerState>()
-                    .expect("Editor.layer_state must be LayerState");
-                let type_name = std::any::type_name::<ui::TabManager>();
-                if let Some(tab_manager) = ls
-                    .layers
-                    .iter_mut()
-                    .find(|c| c.type_name() == type_name)
-                    .and_then(|c| c.as_any_mut().downcast_mut::<ui::TabManager>())
-                {
-                    let active_index = tab_manager.active_index();
-                    for i in 0..tab_manager.tab_count() {
-                        let tab = &tab_manager.tabs()[i];
-                        let name = tab.name(editor);
-                        let path = tab.icon_path(editor);
-                        items.push(TabMeta {
-                            tab_index: i,
-                            path,
-                            name,
-                            is_active: i == active_index,
-                        });
-                    }
+            if let Some(state) = editor.app_state.downcast_ref::<crate::ui::app::AppState>() {
+                let active_index = state.active;
+                for (i, app) in state.apps.iter().enumerate() {
+                    let name = app.name(editor);
+                    let path = app.icon_path(editor);
+                    items.push(TabMeta {
+                        tab_index: i,
+                        path,
+                        name,
+                        is_active: i == active_index,
+                    });
                 }
             }
-            editor.layer_state = layer_box;
 
             let columns = [
                 PickerColumn::new("flags", |meta: &TabMeta, _| {
@@ -2537,7 +2328,8 @@ fn buffer_picker(cx: &mut Context) {
                 cx.jobs.callback(async move {
                     let callback = crate::job::Callback::Editor(Box::new(
                         move |editor| {
-                            editor.activate_tab(tab_index);
+                            use crate::ui::EditorApps;
+                            editor.switch_app(tab_index);
                         },
                     ));
                     Ok(callback)
@@ -2713,44 +2505,37 @@ fn changed_file_picker(cx: &mut Context) {
         [],
         data,
         |cx, item: &GitViewItem, _action| {
-            let diff_text = match item {
-                GitViewItem::LocalChanges { cwd } => {
-                    cx.editor.diff_providers.get_local_diff(cwd).unwrap_or_default()
-                }
-                GitViewItem::Commit { info, cwd } => {
-                    cx.editor.diff_providers.get_commit_diff(cwd, &info.hash).unwrap_or_default()
-                }
+            use crate::ui::diff_view::{DiffKey, DiffView};
+
+            let (diff_key, cwd_clone, files) = match item {
+                GitViewItem::LocalChanges { cwd } => (
+                    DiffKey::LocalChanges,
+                    cwd.clone(),
+                    cx.editor
+                        .diff_providers
+                        .get_local_diff_files(cwd)
+                        .unwrap_or_default(),
+                ),
+                GitViewItem::Commit { info, cwd } => (
+                    DiffKey::CommitDiff {
+                        hash: info.hash.clone(),
+                    },
+                    cwd.clone(),
+                    cx.editor
+                        .diff_providers
+                        .get_commit_diff_files(cwd, &info.hash)
+                        .unwrap_or_default(),
+                ),
             };
-            if diff_text.is_empty() {
+            if files.is_empty() {
                 cx.editor.set_status("No changes");
                 return;
             }
-            let name = match item {
-                GitViewItem::LocalChanges { .. } => "[local-changes]".to_string(),
-                GitViewItem::Commit { info, .. } => {
-                    let short = if info.hash.len() > 7 { &info.hash[..7] } else { &info.hash };
-                    format!("[{short}]")
-                }
-            };
-            let mut doc = Document::from(
-                Rope::from(diff_text.as_str()),
-                None,
-                cx.editor.config.clone(),
-                cx.editor.syn_loader.clone(),
-            );
-            doc.diff_source = Some(match item {
-                GitViewItem::LocalChanges { cwd } => DiffSource::LocalChanges { cwd: cwd.clone() },
-                GitViewItem::Commit { info, cwd } => DiffSource::CommitDiff {
-                    cwd: cwd.clone(),
-                    hash: info.hash.clone(),
-                },
-            });
-            doc.set_path(Some(std::path::Path::new(&name)));
-            let loader = cx.editor.syn_loader.load();
-            let _ = doc.set_language_by_language_id("diff", &loader);
             let callback = crate::job::Callback::Editor(Box::new(
                 move |editor: &mut Editor| {
-                    crate::ui::TabManager::add_editor_tab(editor, doc);
+                    use crate::ui::EditorApps;
+                    let diff_view = DiffView::new(diff_key, cwd_clone, files, editor);
+                    editor.add_diff_app(diff_view);
                 },
             ));
             cx.jobs.callback(async { Ok(callback) });
@@ -2796,23 +2581,18 @@ pub fn command_palette(cx: &mut Context) {
     cx.callback.push(Box::new(
         move |editor: &mut Editor| {
             use crate::layers::EditorLayers;
-            // Extract keymap from TabManager by temporarily taking layers
+            // Extract keymap from the active EditorView in app_state
             let keymap = {
-                let mut layer_box = std::mem::replace(&mut editor.layer_state, Box::new(()));
-                let keymap = {
-                    let ls = layer_box
-                        .downcast_mut::<crate::layers::LayerState>()
-                        .expect("Editor.layer_state must be LayerState");
-                    let type_name = std::any::type_name::<ui::TabManager>();
-                    ls.layers
-                        .iter_mut()
-                        .find(|c| c.type_name() == type_name)
-                        .and_then(|c| c.as_any_mut().downcast_mut::<ui::TabManager>())
-                        .and_then(|tm| tm.active_editor_view())
-                        .map(|ev| ev.keymaps.map()[&editor.mode()].reverse_map())
+                let state = match editor.app_state.downcast_ref::<crate::ui::app::AppState>() {
+                    Some(s) => s,
+                    None => return,
                 };
-                editor.layer_state = layer_box;
-                match keymap {
+                let ev_keymaps = state
+                    .apps
+                    .get(state.active)
+                    .and_then(|app| app.as_any().downcast_ref::<ui::EditorView>())
+                    .map(|ev| ev.keymaps.map()[&editor.mode()].reverse_map());
+                match ev_keymaps {
                     Some(km) => km,
                     None => return,
                 }
@@ -2864,7 +2644,7 @@ pub fn command_palette(cx: &mut Context) {
                     count,
                     editor: cx.editor,
                     callback: Vec::new(),
-                    on_next_key_callback: None,
+
                     jobs: cx.jobs,
                 };
                 let focus = view!(ctx.editor).id;
@@ -3599,7 +3379,13 @@ fn wclose(cx: &mut Context) {
     }
     let view_id = view!(cx.editor).id;
     // close current split
-    cx.editor.close(view_id);
+    if cx.editor.close(view_id) {
+        // Tree is empty — close the tab via TabManager callback
+        cx.callback.push(Box::new(|editor: &mut Editor| {
+            use crate::ui::EditorApps;
+            editor.close_active_app();
+        }));
+    }
 }
 
 fn wonly(cx: &mut Context) {
@@ -3769,105 +3555,8 @@ fn select_textobject_inner(cx: &mut Context) {
 
 fn select_textobject(cx: &mut Context, objtype: textobject::TextObject) {
     let count = cx.count();
-
-    cx.on_next_key(move |cx, event| {
-        cx.editor.autoinfo = None;
-        if let Some(ch) = event.char() {
-            let textobject = move |editor: &mut Editor| {
-                let (view, doc) = current!(editor);
-                let loader = editor.syn_loader.load();
-                let text = doc.text().slice(..);
-
-                let textobject_treesitter = |obj_name: &str, range: Range| -> Range {
-                    let Some(syntax) = doc.syntax() else {
-                        return range;
-                    };
-                    textobject::textobject_treesitter(
-                        text, range, objtype, obj_name, syntax, &loader, count,
-                    )
-                };
-
-                if ch == 'g' && doc.diff_handle().is_none() {
-                    editor.set_status("Diff is not available in current buffer");
-                    return;
-                }
-
-                let textobject_change = |range: Range| -> Range {
-                    let diff_handle = doc.diff_handle().unwrap();
-                    let diff = diff_handle.load();
-                    let line = range.cursor_line(text);
-                    let hunk_idx = if let Some(hunk_idx) = diff.hunk_at(line as u32, false) {
-                        hunk_idx
-                    } else {
-                        return range;
-                    };
-                    let hunk = diff.nth_hunk(hunk_idx).after;
-
-                    let start = text.line_to_char(hunk.start as usize);
-                    let end = text.line_to_char(hunk.end as usize);
-                    Range::new(start, end).with_direction(range.direction())
-                };
-
-                let selection = doc.selection(view.id).clone().transform(|range| {
-                    match ch {
-                        'w' => textobject::textobject_word(text, range, objtype, count, false),
-                        'W' => textobject::textobject_word(text, range, objtype, count, true),
-                        't' => textobject_treesitter("class", range),
-                        'f' => textobject_treesitter("function", range),
-                        'a' => textobject_treesitter("parameter", range),
-                        'c' => textobject_treesitter("comment", range),
-                        'T' => textobject_treesitter("test", range),
-                        'e' => textobject_treesitter("entry", range),
-                        'x' => textobject_treesitter("xml-element", range),
-                        'p' => textobject::textobject_paragraph(text, range, objtype, count),
-                        'm' => textobject::textobject_pair_surround_closest(
-                            doc.syntax(),
-                            text,
-                            range,
-                            objtype,
-                            count,
-                        ),
-                        'g' => textobject_change(range),
-                        // TODO: cancel new ranges if inconsistent surround matches across lines
-                        ch if !ch.is_ascii_alphanumeric() => textobject::textobject_pair_surround(
-                            doc.syntax(),
-                            text,
-                            range,
-                            objtype,
-                            ch,
-                            count,
-                        ),
-                        _ => range,
-                    }
-                });
-                doc.set_selection(view.id, selection);
-            };
-            cx.editor.apply_motion(textobject);
-        }
-    });
-
-    let title = match objtype {
-        textobject::TextObject::Inside => "Match inside",
-        textobject::TextObject::Around => "Match around",
-        _ => return,
-    };
-    let help_text = [
-        ("w", "Word"),
-        ("W", "WORD"),
-        ("p", "Paragraph"),
-        ("t", "Type definition (tree-sitter)"),
-        ("f", "Function (tree-sitter)"),
-        ("a", "Argument/parameter (tree-sitter)"),
-        ("c", "Comment (tree-sitter)"),
-        ("T", "Test (tree-sitter)"),
-        ("e", "Data structure entry (tree-sitter)"),
-        ("m", "Closest surrounding pair (tree-sitter)"),
-        ("g", "Change"),
-        ("x", "(X)HTML element (tree-sitter)"),
-        (" ", "... or any character acting as a pair"),
-    ];
-
-    cx.editor.autoinfo = Some(Info::new(title, &help_text));
+    let menu = crate::ui::textobject_menu::TextObjectMenu::new(objtype, count);
+    cx.push_layer(Box::new(menu));
 }
 
 fn suspend(_cx: &mut Context) {
@@ -3884,201 +3573,6 @@ fn suspend(_cx: &mut Context) {
         _cx.block_try_flush_writes().ok();
         signal_hook::low_level::raise(signal_hook::consts::signal::SIGTSTP).unwrap();
     }
-}
-
-fn goto_word(cx: &mut Context) {
-    jump_to_word(cx, Movement::Move)
-}
-
-fn extend_to_word(cx: &mut Context) {
-    jump_to_word(cx, Movement::Extend)
-}
-
-fn jump_to_label(cx: &mut Context, labels: Vec<Range>, behaviour: Movement) {
-    let doc = doc!(cx.editor);
-    let alphabet = &cx.editor.config().jump_label_alphabet;
-    if labels.is_empty() {
-        return;
-    }
-    let alphabet_char = |i| {
-        let mut res = Tendril::new();
-        res.push(alphabet[i]);
-        res
-    };
-
-    // Add label for each jump candidate to the View as virtual text.
-    let text = doc.text().slice(..);
-    let mut overlays: Vec<_> = labels
-        .iter()
-        .enumerate()
-        .flat_map(|(i, range)| {
-            [
-                Overlay::new(range.from(), alphabet_char(i / alphabet.len())),
-                Overlay::new(
-                    graphemes::next_grapheme_boundary(text, range.from()),
-                    alphabet_char(i % alphabet.len()),
-                ),
-            ]
-        })
-        .collect();
-    overlays.sort_unstable_by_key(|overlay| overlay.char_idx);
-    let (view, doc) = current!(cx.editor);
-    doc.set_jump_labels(view.id, overlays);
-
-    // Accept two characters matching a visible label. Jump to the candidate
-    // for that label if it exists.
-    let primary_selection = doc.selection(view.id).primary();
-    let view = view.id;
-    cx.on_next_key(move |cx, event| {
-        let alphabet = &cx.editor.config().jump_label_alphabet;
-        let Some(i) = event
-            .char()
-            .filter(|_| event.modifiers.is_empty())
-            .and_then(|ch| alphabet.iter().position(|&it| it == ch))
-        else {
-            doc_mut!(cx.editor).remove_jump_labels(view);
-            return;
-        };
-        let outer = i * alphabet.len();
-        // Bail if the given character cannot be a jump label.
-        if outer > labels.len() {
-            doc_mut!(cx.editor).remove_jump_labels(view);
-            return;
-        }
-        cx.on_next_key(move |cx, event| {
-            doc_mut!(cx.editor).remove_jump_labels(view);
-            let alphabet = &cx.editor.config().jump_label_alphabet;
-            let Some(inner) = event
-                .char()
-                .filter(|_| event.modifiers.is_empty())
-                .and_then(|ch| alphabet.iter().position(|&it| it == ch))
-            else {
-                return;
-            };
-            if let Some(mut range) = labels.get(outer + inner).copied() {
-                range = if behaviour == Movement::Extend {
-                    let anchor = if range.anchor < range.head {
-                        let from = primary_selection.from();
-                        if range.anchor < from {
-                            range.anchor
-                        } else {
-                            from
-                        }
-                    } else {
-                        let to = primary_selection.to();
-                        if range.anchor > to {
-                            range.anchor
-                        } else {
-                            to
-                        }
-                    };
-                    Range::new(anchor, range.head)
-                } else {
-                    range.with_direction(Direction::Forward)
-                };
-                save_selection(cx);
-                doc_mut!(cx.editor).set_selection(view, range.into());
-            }
-        });
-    });
-}
-
-fn jump_to_word(cx: &mut Context, behaviour: Movement) {
-    // Calculate the jump candidates: ranges for any visible words with two or
-    // more characters.
-    let alphabet = &cx.editor.config().jump_label_alphabet;
-    if alphabet.is_empty() {
-        return;
-    }
-
-    let jump_label_limit = alphabet.len() * alphabet.len();
-    let mut words = Vec::with_capacity(jump_label_limit);
-    let (view, doc) = current_ref!(cx.editor);
-    let text = doc.text().slice(..);
-
-    // This is not necessarily exact if there is virtual text like soft wrap.
-    // It's ok though because the extra jump labels will not be rendered.
-    let start = text.line_to_char(text.char_to_line(doc.view_offset(view.id).anchor));
-    let end = text.line_to_char(view.estimate_last_doc_line(doc) + 1);
-
-    let primary_selection = doc.selection(view.id).primary();
-    let cursor = primary_selection.cursor(text);
-    let mut cursor_fwd = Range::point(cursor);
-    let mut cursor_rev = Range::point(cursor);
-    if text.get_char(cursor).is_some_and(|c| !c.is_whitespace()) {
-        let cursor_word_end = movement::move_next_word_end(text, cursor_fwd, 1);
-        //  single grapheme words need a special case
-        if cursor_word_end.anchor == cursor {
-            cursor_fwd = cursor_word_end;
-        }
-        let cursor_word_start = movement::move_prev_word_start(text, cursor_rev, 1);
-        if cursor_word_start.anchor == next_grapheme_boundary(text, cursor) {
-            cursor_rev = cursor_word_start;
-        }
-    }
-    'outer: loop {
-        let mut changed = false;
-        while cursor_fwd.head < end {
-            cursor_fwd = movement::move_next_word_end(text, cursor_fwd, 1);
-            // The cursor is on a word that is atleast two graphemes long and
-            // madeup of word characters. The latter condition is needed because
-            // move_next_word_end simply treats a sequence of characters from
-            // the same char class as a word so `=<` would also count as a word.
-            let add_label = text
-                .slice(..cursor_fwd.head)
-                .graphemes_rev()
-                .take(2)
-                .take_while(|g| g.chars().all(char_is_word))
-                .count()
-                == 2;
-            if !add_label {
-                continue;
-            }
-            changed = true;
-            // skip any leading whitespace
-            cursor_fwd.anchor += text
-                .chars_at(cursor_fwd.anchor)
-                .take_while(|&c| !char_is_word(c))
-                .count();
-            words.push(cursor_fwd);
-            if words.len() == jump_label_limit {
-                break 'outer;
-            }
-            break;
-        }
-        while cursor_rev.head > start {
-            cursor_rev = movement::move_prev_word_start(text, cursor_rev, 1);
-            // The cursor is on a word that is atleast two graphemes long and
-            // madeup of word characters. The latter condition is needed because
-            // move_prev_word_start simply treats a sequence of characters from
-            // the same char class as a word so `=<` would also count as a word.
-            let add_label = text
-                .slice(cursor_rev.head..)
-                .graphemes()
-                .take(2)
-                .take_while(|g| g.chars().all(char_is_word))
-                .count()
-                == 2;
-            if !add_label {
-                continue;
-            }
-            changed = true;
-            cursor_rev.anchor -= text
-                .chars_at(cursor_rev.anchor)
-                .reversed()
-                .take_while(|&c| !char_is_word(c))
-                .count();
-            words.push(cursor_rev);
-            if words.len() == jump_label_limit {
-                break 'outer;
-            }
-            break;
-        }
-        if !changed {
-            break;
-        }
-    }
-    jump_to_label(cx, words, behaviour)
 }
 
 fn lsp_or_syntax_symbol_picker(cx: &mut Context) {

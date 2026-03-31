@@ -344,7 +344,10 @@ impl AppBuilder {
                 app.editor.config.clone(),
                 app.editor.syn_loader.clone(),
             );
-            helix_term::ui::TabManager::add_editor_tab(&mut app.editor, doc);
+{
+                use helix_term::ui::EditorApps;
+                app.editor.add_editor_app(doc);
+            }
         }
 
         if let Some((text, selection)) = self.input {
