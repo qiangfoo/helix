@@ -47,10 +47,9 @@ impl Component for ActiveAppProxy {
     }
 
     fn cursor(&self, _area: Rect, editor: &Editor) -> (Option<Position>, CursorKind) {
-        if let Some(state) = editor.app_state.downcast_ref::<AppState>() {
-            if let Some(app) = state.apps.get(state.active) {
-                return app.cursor(editor.main_area, editor);
-            }
+        let state = editor.app_state::<AppState>();
+        if let Some(app) = state.apps.get(state.active) {
+            return app.cursor(editor.main_area, editor);
         }
         (None, CursorKind::Hidden)
     }

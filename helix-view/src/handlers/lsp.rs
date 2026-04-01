@@ -5,7 +5,7 @@ use std::fmt::Display;
 use crate::events::{
     DiagnosticsDidChange, DocumentDidChange, DocumentDidClose, LanguageServerInitialized,
 };
-use crate::{AppId, Editor};
+use crate::{AppId, editor::EditorModel};
 use helix_core::diagnostic::DiagnosticProvider;
 use helix_core::Uri;
 use helix_event::register_hook;
@@ -78,7 +78,7 @@ impl Display for ApplyEditErrorKind {
     }
 }
 
-impl Editor {
+impl EditorModel {
     fn apply_text_edits(
         &mut self,
         url: &helix_lsp::Url,

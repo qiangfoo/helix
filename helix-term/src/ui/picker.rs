@@ -1126,10 +1126,7 @@ impl<I: 'static + Send + Sync, D: 'static + Send + Sync> Component for Picker<I,
                     picker.version.fetch_add(1, atomic::Ordering::Relaxed);
                     Box::new(|editor: &mut Editor| {
                         // remove the layer
-                        let ls = editor
-                            .layer_state
-                            .downcast_mut::<crate::layers::LayerState>()
-                            .expect("Editor.layer_state must be LayerState");
+                        let ls = editor.layer_state_mut::<crate::layers::LayerState>();
                         ls.last_picker = ls.layers.pop();
                     })
                 };

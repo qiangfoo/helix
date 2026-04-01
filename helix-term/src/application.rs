@@ -251,7 +251,7 @@ impl Application {
     async fn render(&mut self) {
         {
             use crate::layers::LayerState;
-            let ls = self.editor.layer_state.downcast_mut::<LayerState>().unwrap();
+            let ls = self.editor.layer_state_mut::<LayerState>();
             if ls.full_redraw {
                 self.terminal.clear().expect("Cannot clear the terminal");
                 ls.full_redraw = false;

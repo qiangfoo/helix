@@ -38,7 +38,7 @@ use crate::{
     editor::Config,
     events::{DocumentDidChange, SelectionDidChange},
     view::ViewPosition,
-    AppId, Editor, Theme, View, ViewId,
+    AppId, editor::EditorModel, Theme, View, ViewId,
 };
 
 /// 8kB of buffer space for encoding and decoding `Rope`s.
@@ -317,7 +317,7 @@ impl fmt::Debug for DocumentInlayHintsId {
     }
 }
 
-impl Editor {
+impl EditorModel {
     pub(crate) fn clear_doc_relative_paths(&mut self) {
         self.tabs[self.active_tab].doc_mut().relative_path.take();
     }

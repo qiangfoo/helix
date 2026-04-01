@@ -2297,7 +2297,7 @@ fn buffer_picker(cx: &mut Context) {
         |editor: &mut Editor| {
             use crate::layers::EditorLayers;
             let mut items: Vec<TabMeta> = Vec::new();
-            if let Some(state) = editor.app_state.downcast_ref::<crate::ui::app::AppState>() {
+            { let state = editor.app_state::<crate::ui::app::AppState>();
                 let active_index = state.active;
                 for (i, app) in state.apps.iter().enumerate() {
                     let name = app.name(editor);
@@ -2580,10 +2580,7 @@ pub fn command_palette(cx: &mut Context) {
             use crate::layers::EditorLayers;
             // Extract keymap from the active EditorView in app_state
             let keymap = {
-                let state = match editor.app_state.downcast_ref::<crate::ui::app::AppState>() {
-                    Some(s) => s,
-                    None => return,
-                };
+                let state = editor.app_state::<crate::ui::app::AppState>();
                 let ev_keymaps = state
                     .apps
                     .get(state.active)
@@ -2662,10 +2659,7 @@ pub fn command_palette(cx: &mut Context) {
 fn last_picker(cx: &mut Context) {
     // TODO: last picker does not seem to work well with buffer_picker
     cx.callback.push(Box::new(|editor: &mut Editor| {
-        let ls = editor
-            .layer_state
-            .downcast_mut::<crate::layers::LayerState>()
-            .expect("Editor.layer_state must be LayerState");
+        let ls = editor.layer_state_mut::<crate::layers::LayerState>();
         if let Some(picker) = ls.last_picker.take() {
             ls.layers.push(picker);
         } else {

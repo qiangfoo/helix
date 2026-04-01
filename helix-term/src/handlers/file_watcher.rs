@@ -199,18 +199,15 @@ fn dispatch_diff_refreshes() {
 
         // Check if the active app is a DiffView with LocalChanges
         let diff_view_cwd: Option<std::path::PathBuf> = {
-            if let Some(state) = editor.app_state.downcast_ref::<crate::ui::app::AppState>() {
-                state
-                    .apps
-                    .get(state.active)
-                    .and_then(|app| app.as_any().downcast_ref::<DiffView>())
-                    .and_then(|dv| match dv.diff_key() {
-                        DiffKey::LocalChanges => Some(dv.cwd().to_path_buf()),
-                        DiffKey::CommitDiff { .. } => None,
-                    })
-            } else {
-                None
-            }
+            let state = editor.app_state::<crate::ui::app::AppState>();
+            state
+                .apps
+                .get(state.active)
+                .and_then(|app| app.as_any().downcast_ref::<DiffView>())
+                .and_then(|dv| match dv.diff_key() {
+                    DiffKey::LocalChanges => Some(dv.cwd().to_path_buf()),
+                    DiffKey::CommitDiff { .. } => None,
+                })
         };
 
         if let Some(cwd) = diff_view_cwd {
@@ -218,12 +215,11 @@ fn dispatch_diff_refreshes() {
             tokio::task::spawn_blocking(move || {
                 let files = diff_providers.get_local_diff_files(&cwd).unwrap_or_default();
                 job::dispatch_blocking(move |editor| {
-                    if let Some(state) = editor.app_state.downcast_mut::<crate::ui::app::AppState>() {
-                        if let Some(app) = state.apps.get_mut(state.active) {
-                            if let Some(dv) = app.as_any_mut().downcast_mut::<DiffView>() {
-                                if matches!(dv.diff_key(), DiffKey::LocalChanges) {
-                                    dv.refresh(files);
-                                }
+                    let state = editor.app_state_mut::<crate::ui::app::AppState>();
+                    if let Some(app) = state.apps.get_mut(state.active) {
+                        if let Some(dv) = app.as_any_mut().downcast_mut::<DiffView>() {
+                            if matches!(dv.diff_key(), DiffKey::LocalChanges) {
+                                dv.refresh(files);
                             }
                         }
                     }

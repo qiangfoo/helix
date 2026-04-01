@@ -94,17 +94,11 @@ pub fn restore_app_state(editor: &mut Editor, state: Box<dyn Any>) {
 }
 
 fn app_state(editor: &Editor) -> &AppState {
-    editor
-        .app_state
-        .downcast_ref::<AppState>()
-        .expect("Editor.app_state must be AppState")
+    editor.app_state::<AppState>()
 }
 
 fn app_state_mut(editor: &mut Editor) -> &mut AppState {
-    editor
-        .app_state
-        .downcast_mut::<AppState>()
-        .expect("Editor.app_state must be AppState")
+    editor.app_state_mut::<AppState>()
 }
 
 // ---------------------------------------------------------------------------

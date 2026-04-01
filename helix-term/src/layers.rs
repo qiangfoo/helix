@@ -35,17 +35,11 @@ impl LayerState {
 }
 
 fn layer_state(editor: &Editor) -> &LayerState {
-    editor
-        .layer_state
-        .downcast_ref::<LayerState>()
-        .expect("Editor.layer_state must be LayerState")
+    editor.layer_state::<LayerState>()
 }
 
 fn layer_state_mut(editor: &mut Editor) -> &mut LayerState {
-    editor
-        .layer_state
-        .downcast_mut::<LayerState>()
-        .expect("Editor.layer_state must be LayerState")
+    editor.layer_state_mut::<LayerState>()
 }
 
 /// Takes the layer_state box out of Editor, leaving a placeholder.
@@ -167,11 +161,12 @@ impl EditorLayers for Editor {
     }
 
     fn handle_layer_event(&mut self, event: &Event, jobs: &mut crate::job::Jobs) -> bool {
-        // Take layers out of Editor so we can pass &mut Editor to Context
+        // Take layers out of Editor so we can pass &mut Editor to Context.
+        // We take the whole Box to avoid borrowing self while passing it to Context.
         let mut layer_box = take_layers(self);
         let ls = layer_box
             .downcast_mut::<LayerState>()
-            .expect("Editor.layer_state must be LayerState");
+            .expect("Editor.layer_state type mismatch");
 
         let mut callbacks: Vec<Callback> = Vec::new();
         let mut consumed = false;
@@ -216,7 +211,7 @@ impl EditorLayers for Editor {
         let mut layer_box = take_layers(self);
         let ls = layer_box
             .downcast_mut::<LayerState>()
-            .expect("Editor.layer_state must be LayerState");
+            .expect("Editor.layer_state type mismatch");
 
         {
             let mut cx = Context {

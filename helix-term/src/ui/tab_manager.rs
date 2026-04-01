@@ -127,10 +127,7 @@ impl TabManager {
         viewport: Rect,
         surface: &mut Surface,
     ) {
-        let state = editor
-            .app_state
-            .downcast_ref::<AppState>()
-            .expect("Editor.app_state must be AppState");
+        let state = editor.app_state::<AppState>();
 
         let tab_active_style = editor
             .theme
@@ -244,7 +241,8 @@ impl TabManager {
                     disp.push_str(&count.to_string());
                 }
             }
-            if let Some(state) = editor.app_state.downcast_ref::<AppState>() {
+            {
+                let state = editor.app_state::<AppState>();
                 if let Some(app) = state.apps.get(state.active) {
                     disp.push_str(&app.pending_keys());
                 }
@@ -263,10 +261,8 @@ impl TabManager {
 
     /// Clean up stale EditorView entries whose backing DocView no longer exists.
     fn cleanup_stale_shells(editor: &mut Editor) {
-        let state = match editor.app_state.downcast_mut::<AppState>() {
-            Some(s) => s,
-            None => return,
-        };
+        let editor_tab_count = editor.tabs.len();
+        let state = editor.app_state_mut::<AppState>();
 
         if state.apps.len() == 1
             && state.apps[0]
@@ -276,8 +272,6 @@ impl TabManager {
         {
             return;
         }
-
-        let editor_tab_count = editor.tabs.len();
 
         state.apps.retain(|app| {
             if let Some(ev) = app.as_any().downcast_ref::<EditorView>() {
