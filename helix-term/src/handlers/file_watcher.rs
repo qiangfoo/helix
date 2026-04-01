@@ -199,10 +199,8 @@ fn dispatch_diff_refreshes() {
 
         // Check if the active app is a DiffView with LocalChanges
         let diff_view_cwd: Option<std::path::PathBuf> = {
-            let state = editor.app_state::<crate::ui::app::AppState>();
-            state
-                .apps
-                .get(state.active)
+            use crate::ui::app::get_app;
+            get_app(editor, editor.active_app)
                 .and_then(|app| app.as_any().downcast_ref::<DiffView>())
                 .and_then(|dv| match dv.diff_key() {
                     DiffKey::LocalChanges => Some(dv.cwd().to_path_buf()),
@@ -215,8 +213,8 @@ fn dispatch_diff_refreshes() {
             tokio::task::spawn_blocking(move || {
                 let files = diff_providers.get_local_diff_files(&cwd).unwrap_or_default();
                 job::dispatch_blocking(move |editor| {
-                    let state = editor.app_state_mut::<crate::ui::app::AppState>();
-                    if let Some(app) = state.apps.get_mut(state.active) {
+                    use crate::ui::app::get_app_mut;
+                    if let Some(app) = get_app_mut(editor, editor.active_app) {
                         if let Some(dv) = app.as_any_mut().downcast_mut::<DiffView>() {
                             if matches!(dv.diff_key(), DiffKey::LocalChanges) {
                                 dv.refresh(files);

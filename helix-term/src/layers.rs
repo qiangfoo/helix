@@ -4,12 +4,16 @@
 //! This module provides `LayerState` (the concrete type stored there) and
 //! the `EditorLayers` extension trait that adds layer management methods to Editor.
 
+use std::sync::Arc;
+
+use arc_swap::ArcSwap;
 use helix_view::graphics::{CursorKind, Rect};
 use helix_view::Editor;
 
 use ratatui::buffer::Buffer as Surface;
 
 use crate::compositor::{Callback, Component, Context, Event, EventResult};
+use crate::config::Config;
 use crate::ui::picker;
 
 /// The concrete layer state stored inside `Editor.layer_state`.
@@ -20,6 +24,8 @@ pub struct LayerState {
     pub area: Rect,
     /// Keys queued for replay (e.g. from macros). Drained in the main event loop.
     pub pending_keys: Vec<helix_view::input::KeyEvent>,
+    /// helix-term Config, used for building keymaps.
+    pub term_config: Option<Arc<ArcSwap<Config>>>,
 }
 
 impl LayerState {
@@ -30,6 +36,7 @@ impl LayerState {
             full_redraw: false,
             area,
             pending_keys: Vec::new(),
+            term_config: None,
         }
     }
 }

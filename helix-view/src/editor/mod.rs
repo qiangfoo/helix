@@ -55,7 +55,7 @@ pub const DIR_STACK_CAP: usize = 10;
 
 type Diagnostics = BTreeMap<Uri, Vec<(lsp::Diagnostic, DiagnosticProvider)>>;
 
-pub struct EditorModel {
+pub struct EditorState {
     /// Per-tab state: each tab owns a document, view tree, mode, etc.
     pub tabs: Vec<Box<dyn Tab>>,
     /// Index of the currently active tab.
@@ -98,16 +98,18 @@ pub struct EditorModel {
     /// Use `layer_state()` / `layer_state_mut()` for typed access.
     pub layer_state: Box<dyn std::any::Any>,
 
-    /// Typed application state (tabs), managed by helix-term.
-    /// Use `app_state()` / `app_state_mut()` for typed access.
-    pub app_state: Box<dyn std::any::Any>,
+    /// Application instances managed by helix-term.
+    /// Each element is a `Box<Box<dyn Application>>` erased to `Box<dyn Any>`.
+    pub apps: Vec<Box<dyn std::any::Any>>,
+    /// Index of the currently active application.
+    pub active_app: usize,
 
     /// Content area computed by the tab bar chrome layer.
     /// Excludes tab bar and commandline; applications render into this area.
     pub main_area: Rect,
 }
 
-impl EditorModel {
+impl EditorState {
     /// Typed accessor for the layer state. Panics if not initialized.
     pub fn layer_state<T: 'static>(&self) -> &T {
         self.layer_state
@@ -121,26 +123,11 @@ impl EditorModel {
             .downcast_mut::<T>()
             .expect("Editor.layer_state type mismatch")
     }
-
-    /// Typed accessor for the app state. Panics if not initialized.
-    pub fn app_state<T: 'static>(&self) -> &T {
-        self.app_state
-            .downcast_ref::<T>()
-            .expect("Editor.app_state type mismatch")
-    }
-
-    /// Typed mutable accessor for the app state. Panics if not initialized.
-    pub fn app_state_mut<T: 'static>(&mut self) -> &mut T {
-        self.app_state
-            .downcast_mut::<T>()
-            .expect("Editor.app_state type mismatch")
-    }
 }
 
-/// Temporary alias while migrating to the new Editor in helix-term.
-pub type Editor = EditorModel;
+pub type Editor = EditorState;
 
-pub type Motion = Box<dyn Fn(&mut EditorModel)>;
+pub type Motion = Box<dyn Fn(&mut EditorState)>;
 
 #[derive(Debug)]
 pub enum EditorEvent {
@@ -187,7 +174,7 @@ pub enum CloseError {
     SaveError(anyhow::Error),
 }
 
-impl EditorModel {
+impl EditorState {
     pub fn new(
         mut area: Rect,
         theme_loader: Arc<theme::Loader>,
@@ -228,7 +215,8 @@ impl EditorModel {
             handlers,
             dir_stack: VecDeque::with_capacity(DIR_STACK_CAP),
             layer_state: Box::new(()),
-            app_state: Box::new(()),
+            apps: Vec::new(),
+            active_app: 0,
             main_area: Rect::default(),
         }
     }
@@ -256,7 +244,7 @@ impl EditorModel {
             self.last_motion = Some(motion);
         }
     }
-    /// Current editing mode for the [`EditorModel`].
+    /// Current editing mode for the [`EditorState`].
     pub fn mode(&self) -> Mode {
         if self.tabs.is_empty() {
             return Mode::Normal;
@@ -536,7 +524,7 @@ impl EditorModel {
         doc.detect_indent_and_line_ending();
         self.refresh_language_servers(doc_id);
         let doc = self.tabs[self.active_tab].doc_mut();
-        let diagnostics = EditorModel::doc_diagnostics(&self.language_servers, &self.diagnostics, doc);
+        let diagnostics = EditorState::doc_diagnostics(&self.language_servers, &self.diagnostics, doc);
         doc.replace_diagnostics(diagnostics, &[], None);
         doc.reset_all_inlay_hints();
     }
@@ -736,7 +724,7 @@ impl EditorModel {
         diagnostics: &'a Diagnostics,
         document: &Document,
     ) -> impl Iterator<Item = helix_core::Diagnostic> + 'a {
-        EditorModel::doc_diagnostics_with_filter(language_servers, diagnostics, document, |_, _| true)
+        EditorState::doc_diagnostics_with_filter(language_servers, diagnostics, document, |_, _| true)
     }
 
     /// Returns all supported diagnostics for the document

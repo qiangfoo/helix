@@ -10,9 +10,11 @@ use ratatui::buffer::Buffer as Surface;
 
 use crate::compositor::{self, Component, Context, EventResult};
 
-use super::app::{take_app_state, restore_app_state, AppState};
+use super::app::{get_app, Application};
 
-/// A stateless Component that delegates to `editor.app_state[active]`.
+type AppBox = Box<dyn Application>;
+
+/// A stateless Component that delegates to `editor.apps[active_app]`.
 pub struct ActiveAppProxy;
 
 impl Component for ActiveAppProxy {
@@ -21,34 +23,36 @@ impl Component for ActiveAppProxy {
         event: &compositor::Event,
         ctx: &mut Context,
     ) -> EventResult {
-        let mut state_box = take_app_state(ctx.editor);
-        let result = if let Some(state) = state_box.downcast_mut::<AppState>() {
-            if let Some(app) = state.apps.get_mut(state.active) {
-                app.handle_event(event, ctx)
-            } else {
-                EventResult::Ignored(None)
-            }
+        let idx = ctx.editor.active_app;
+        if idx >= ctx.editor.apps.len() {
+            return EventResult::Ignored(None);
+        }
+        // Take the active app out to split the borrow with ctx.editor
+        let mut app_any = std::mem::replace(&mut ctx.editor.apps[idx], Box::new(()));
+        let result = if let Some(app) = app_any.downcast_mut::<AppBox>() {
+            app.handle_event(event, ctx)
         } else {
             EventResult::Ignored(None)
         };
-        restore_app_state(ctx.editor, state_box);
+        ctx.editor.apps[idx] = app_any;
         result
     }
 
     fn render(&mut self, _area: Rect, surface: &mut Surface, ctx: &mut Context) {
-        let mut state_box = take_app_state(ctx.editor);
-        if let Some(state) = state_box.downcast_mut::<AppState>() {
-            let main_area = ctx.editor.main_area;
-            if let Some(app) = state.apps.get_mut(state.active) {
-                app.render(main_area, surface, ctx);
-            }
+        let idx = ctx.editor.active_app;
+        if idx >= ctx.editor.apps.len() {
+            return;
         }
-        restore_app_state(ctx.editor, state_box);
+        let main_area = ctx.editor.main_area;
+        let mut app_any = std::mem::replace(&mut ctx.editor.apps[idx], Box::new(()));
+        if let Some(app) = app_any.downcast_mut::<AppBox>() {
+            app.render(main_area, surface, ctx);
+        }
+        ctx.editor.apps[idx] = app_any;
     }
 
     fn cursor(&self, _area: Rect, editor: &Editor) -> (Option<Position>, CursorKind) {
-        let state = editor.app_state::<AppState>();
-        if let Some(app) = state.apps.get(state.active) {
+        if let Some(app) = get_app(editor, editor.active_app) {
             return app.cursor(editor.main_area, editor);
         }
         (None, CursorKind::Hidden)

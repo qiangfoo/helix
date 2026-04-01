@@ -2292,14 +2292,15 @@ fn buffer_picker(cx: &mut Context) {
         is_active: bool,
     }
 
-    // Gather tab metadata from app_state
+    // Gather tab metadata from editor.apps
     cx.callback.push(Box::new(
         |editor: &mut Editor| {
             use crate::layers::EditorLayers;
+            use crate::ui::app::get_app;
             let mut items: Vec<TabMeta> = Vec::new();
-            { let state = editor.app_state::<crate::ui::app::AppState>();
-                let active_index = state.active;
-                for (i, app) in state.apps.iter().enumerate() {
+            let active_index = editor.active_app;
+            for i in 0..editor.apps.len() {
+                if let Some(app) = get_app(editor, i) {
                     let name = app.name(editor);
                     let path = app.icon_path(editor);
                     items.push(TabMeta {
@@ -2578,12 +2579,10 @@ pub fn command_palette(cx: &mut Context) {
     cx.callback.push(Box::new(
         move |editor: &mut Editor| {
             use crate::layers::EditorLayers;
-            // Extract keymap from the active EditorView in app_state
+            // Extract keymap from the active EditorView
             let keymap = {
-                let state = editor.app_state::<crate::ui::app::AppState>();
-                let ev_keymaps = state
-                    .apps
-                    .get(state.active)
+                use crate::ui::app::get_app;
+                let ev_keymaps = get_app(editor, editor.active_app)
                     .and_then(|app| app.as_any().downcast_ref::<ui::EditorView>())
                     .map(|ev| ev.keymaps.map()[&editor.mode()].reverse_map());
                 match ev_keymaps {

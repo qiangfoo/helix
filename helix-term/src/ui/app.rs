@@ -11,6 +11,7 @@ use ratatui::buffer::Buffer as Surface;
 use crate::compositor::{Context, EventResult};
 use crate::config::Config;
 use crate::keymap::Keymaps;
+use crate::layers::LayerState;
 
 pub use helix_view::input::Event;
 pub use helix_view::AppId;
@@ -54,51 +55,26 @@ pub trait Application: Any {
 }
 
 // ---------------------------------------------------------------------------
-// AppState — stored as Editor.app_state (opaque Box<dyn Any>)
+// Typed helpers for accessing editor.apps (Vec<Box<dyn Any>>)
+// Each element is a Box<Box<dyn Application>> erased to Box<dyn Any>.
 // ---------------------------------------------------------------------------
 
-/// Concrete application state stored in `Editor.app_state`.
-pub struct AppState {
-    pub apps: Vec<Box<dyn Application>>,
-    pub active: usize,
-    config: Arc<ArcSwap<Config>>,
+type AppBox = Box<dyn Application>;
+
+pub fn get_app(editor: &Editor, idx: usize) -> Option<&dyn Application> {
+    editor.apps.get(idx)?.downcast_ref::<AppBox>().map(|b| &**b)
 }
 
-impl AppState {
-    pub fn new(config: Arc<ArcSwap<Config>>) -> Self {
-        Self {
-            apps: Vec::new(),
-            active: 0,
-            config,
-        }
-    }
-
-    pub fn make_keymaps(&self) -> Keymaps {
-        let keys = Box::new(arc_swap::access::Map::new(
-            Arc::clone(&self.config),
-            |config: &Config| &config.keys,
-        ));
-        Keymaps::new(keys)
-    }
+pub fn get_app_mut(editor: &mut Editor, idx: usize) -> Option<&mut dyn Application> {
+    editor
+        .apps
+        .get_mut(idx)?
+        .downcast_mut::<AppBox>()
+        .map(|b| &mut **b)
 }
 
-/// Take app_state out of Editor for mutable access during event handling.
-/// Must be restored with `restore_app_state` before returning.
-pub fn take_app_state(editor: &mut Editor) -> Box<dyn Any> {
-    std::mem::replace(&mut editor.app_state, Box::new(()))
-}
-
-/// Restore app_state into Editor after event handling.
-pub fn restore_app_state(editor: &mut Editor, state: Box<dyn Any>) {
-    editor.app_state = state;
-}
-
-fn app_state(editor: &Editor) -> &AppState {
-    editor.app_state::<AppState>()
-}
-
-fn app_state_mut(editor: &mut Editor) -> &mut AppState {
-    editor.app_state_mut::<AppState>()
+fn push_app(editor: &mut Editor, app: Box<dyn Application>) {
+    editor.apps.push(Box::new(app));
 }
 
 // ---------------------------------------------------------------------------
@@ -128,39 +104,35 @@ pub trait EditorApps {
 
 impl EditorApps for Editor {
     fn init_apps(&mut self, config: Arc<ArcSwap<Config>>) {
-        self.app_state = Box::new(AppState::new(config));
+        self.layer_state_mut::<LayerState>().term_config = Some(config);
     }
 
     fn app_count(&self) -> usize {
-        app_state(self).apps.len()
+        self.apps.len()
     }
 
     fn active_app_index(&self) -> usize {
-        app_state(self).active
+        self.active_app
     }
 
     fn app_names(&self) -> Vec<String> {
-        app_state(self)
-            .apps
-            .iter()
-            .map(|a| a.name(self))
+        (0..self.apps.len())
+            .filter_map(|i| get_app(self, i).map(|a| a.name(self)))
             .collect()
     }
 
     fn add_app(&mut self, app: Box<dyn Application>) {
-        let state = app_state_mut(self);
         // Remove welcome tab before adding a real tab
-        if state.apps.len() == 1 {
-            if state.apps[0]
-                .as_any()
-                .downcast_ref::<super::welcome::WelcomePage>()
+        if self.apps.len() == 1 {
+            if get_app(self, 0)
+                .and_then(|a| a.as_any().downcast_ref::<super::welcome::WelcomePage>())
                 .is_some()
             {
-                state.apps.remove(0);
+                self.apps.remove(0);
             }
         }
-        state.apps.push(app);
-        state.active = state.apps.len() - 1;
+        push_app(self, app);
+        self.active_app = self.apps.len() - 1;
     }
 
     fn close_app_at(&mut self, index: usize) {
@@ -169,18 +141,21 @@ impl EditorApps for Editor {
 
         // Extract info we need before mutating, to avoid borrow conflicts
         let (worktree_to_unwatch, editor_tab_index) = {
-            let state = app_state(self);
-            if index >= state.apps.len() {
+            if index >= self.apps.len() {
                 return;
             }
-            let worktree = state.apps[index]
+            let app = match get_app(self, index) {
+                Some(a) => a,
+                None => return,
+            };
+            let worktree = app
                 .as_any()
                 .downcast_ref::<DiffView>()
                 .and_then(|dv| match dv.diff_key() {
                     DiffKey::LocalChanges => Some(dv.cwd().to_path_buf()),
                     _ => None,
                 });
-            let tab_idx = state.apps[index]
+            let tab_idx = app
                 .as_any()
                 .downcast_ref::<super::EditorView>()
                 .map(|ev| ev.tab_index);
@@ -200,11 +175,12 @@ impl EditorApps for Editor {
             if tab_index < self.tabs.len() {
                 self.tabs.remove(tab_index);
                 // Fix up tab_index on remaining EditorViews
-                let state = app_state_mut(self);
-                for app in &mut state.apps {
-                    if let Some(ev) = app.as_any_mut().downcast_mut::<super::EditorView>() {
-                        if ev.tab_index > tab_index {
-                            ev.tab_index -= 1;
+                for app_any in &mut self.apps {
+                    if let Some(app) = app_any.downcast_mut::<AppBox>() {
+                        if let Some(ev) = app.as_any_mut().downcast_mut::<super::EditorView>() {
+                            if ev.tab_index > tab_index {
+                                ev.tab_index -= 1;
+                            }
                         }
                     }
                 }
@@ -214,37 +190,35 @@ impl EditorApps for Editor {
             }
         }
 
-        let state = app_state_mut(self);
-        state.apps.remove(index);
+        self.apps.remove(index);
 
-        if state.apps.is_empty() {
-            state.apps.push(Box::new(super::welcome::WelcomePage::new()));
-            state.active = 0;
+        if self.apps.is_empty() {
+            push_app(self, Box::new(super::welcome::WelcomePage::new()));
+            self.active_app = 0;
             return;
         }
-        if state.active >= state.apps.len() {
-            state.active = state.apps.len() - 1;
-        } else if state.active > index {
-            state.active -= 1;
+        if self.active_app >= self.apps.len() {
+            self.active_app = self.apps.len() - 1;
+        } else if self.active_app > index {
+            self.active_app -= 1;
         }
 
         // Sync editor.active_tab to the current active EditorView
-        if let Some(ev) = state.apps[state.active]
-            .as_any()
-            .downcast_ref::<super::EditorView>()
+        if let Some(ev) = get_app(self, self.active_app)
+            .and_then(|a| a.as_any().downcast_ref::<super::EditorView>())
         {
             self.active_tab = ev.tab_index;
         }
     }
 
     fn close_active_app(&mut self) {
-        let index = app_state(self).active;
+        let index = self.active_app;
         self.close_app_at(index);
     }
 
     fn close_other_apps(&mut self) {
-        let active = app_state(self).active;
-        let count = app_state(self).apps.len();
+        let active = self.active_app;
+        let count = self.apps.len();
         for i in (0..count).rev() {
             if i != active {
                 self.close_app_at(i);
@@ -253,20 +227,18 @@ impl EditorApps for Editor {
     }
 
     fn close_all_apps(&mut self) {
-        let count = app_state(self).apps.len();
+        let count = self.apps.len();
         for _ in 0..count {
             self.close_app_at(0);
         }
     }
 
     fn next_app(&mut self) {
-        let state = app_state_mut(self);
-        if !state.apps.is_empty() {
-            state.active = (state.active + 1) % state.apps.len();
+        if !self.apps.is_empty() {
+            self.active_app = (self.active_app + 1) % self.apps.len();
             // Sync editor.active_tab
-            if let Some(ev) = state.apps[state.active]
-                .as_any()
-                .downcast_ref::<super::EditorView>()
+            if let Some(ev) = get_app(self, self.active_app)
+                .and_then(|a| a.as_any().downcast_ref::<super::EditorView>())
             {
                 self.active_tab = ev.tab_index;
             }
@@ -274,16 +246,14 @@ impl EditorApps for Editor {
     }
 
     fn prev_app(&mut self) {
-        let state = app_state_mut(self);
-        if !state.apps.is_empty() {
-            state.active = if state.active == 0 {
-                state.apps.len() - 1
+        if !self.apps.is_empty() {
+            self.active_app = if self.active_app == 0 {
+                self.apps.len() - 1
             } else {
-                state.active - 1
+                self.active_app - 1
             };
-            if let Some(ev) = state.apps[state.active]
-                .as_any()
-                .downcast_ref::<super::EditorView>()
+            if let Some(ev) = get_app(self, self.active_app)
+                .and_then(|a| a.as_any().downcast_ref::<super::EditorView>())
             {
                 self.active_tab = ev.tab_index;
             }
@@ -291,12 +261,10 @@ impl EditorApps for Editor {
     }
 
     fn switch_app(&mut self, index: usize) {
-        let state = app_state_mut(self);
-        if index < state.apps.len() {
-            state.active = index;
-            if let Some(ev) = state.apps[state.active]
-                .as_any()
-                .downcast_ref::<super::EditorView>()
+        if index < self.apps.len() {
+            self.active_app = index;
+            if let Some(ev) = get_app(self, self.active_app)
+                .and_then(|a| a.as_any().downcast_ref::<super::EditorView>())
             {
                 self.active_tab = ev.tab_index;
             }
@@ -313,13 +281,12 @@ impl EditorApps for Editor {
                     if existing == new_path {
                         self.activate_tab(i);
                         // Find the corresponding app and switch to it
-                        let state = app_state_mut(self);
-                        for (j, app) in state.apps.iter().enumerate() {
-                            if let Some(ev) =
-                                app.as_any().downcast_ref::<super::EditorView>()
+                        for j in 0..self.apps.len() {
+                            if let Some(ev) = get_app(self, j)
+                                .and_then(|a| a.as_any().downcast_ref::<super::EditorView>())
                             {
                                 if ev.tab_index == i {
-                                    state.active = j;
+                                    self.active_app = j;
                                     break;
                                 }
                             }
@@ -330,7 +297,7 @@ impl EditorApps for Editor {
             }
         }
 
-        let keymaps = app_state(self).make_keymaps();
+        let keymaps = self.make_keymaps();
         let dv = helix_view::DocView::new(doc);
         let tab_index = self.add_tab(Box::new(dv));
         let editor_view = Box::new(super::EditorView::new(keymaps, tab_index));
@@ -352,11 +319,12 @@ impl EditorApps for Editor {
         }
 
         // Check for existing DiffView with same key
-        let state = app_state(self);
-        for (i, app) in state.apps.iter().enumerate() {
-            if let Some(existing) = app.as_any().downcast_ref::<super::diff_view::DiffView>() {
+        for i in 0..self.apps.len() {
+            if let Some(existing) = get_app(self, i)
+                .and_then(|a| a.as_any().downcast_ref::<super::diff_view::DiffView>())
+            {
                 if existing.diff_key() == diff_view.diff_key() {
-                    app_state_mut(self).active = i;
+                    self.active_app = i;
                     return;
                 }
             }
@@ -366,6 +334,15 @@ impl EditorApps for Editor {
     }
 
     fn make_keymaps(&self) -> Keymaps {
-        app_state(self).make_keymaps()
+        let config = self
+            .layer_state::<LayerState>()
+            .term_config
+            .as_ref()
+            .expect("term_config not initialized");
+        let keys = Box::new(arc_swap::access::Map::new(
+            Arc::clone(config),
+            |config: &Config| &config.keys,
+        ));
+        Keymaps::new(keys)
     }
 }
