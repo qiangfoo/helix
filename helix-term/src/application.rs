@@ -16,7 +16,6 @@ use helix_view::{
     Align, Document, Editor,
 };
 use serde_json::json;
-use tui::backend::Backend;
 
 use crate::{
     args::Args,
@@ -25,6 +24,7 @@ use crate::{
     handlers,
     job::Jobs,
     layers::EditorLayers,
+    terminal as helix_terminal,
     ui::{self, overlay::overlaid, EditorApps},
 };
 
@@ -41,33 +41,15 @@ use anyhow::{Context, Error};
 #[cfg(not(windows))]
 use {signal_hook::consts::signal, signal_hook_tokio::Signals};
 
-// TODO: Move spinners to Editor for proper LSP progress tracking.
-// For now, spinner operations are no-ops after EditorView was stripped of state.
 #[cfg(windows)]
 type Signals = futures_util::stream::Empty<()>;
 
-#[cfg(all(not(windows), not(feature = "integration")))]
-use tui::backend::TerminaBackend;
-
-#[cfg(all(windows, not(feature = "integration")))]
-use tui::backend::CrosstermBackend;
-
-#[cfg(feature = "integration")]
-use tui::backend::TestBackend;
-
-#[cfg(all(not(windows), not(feature = "integration")))]
-type TerminalBackend = TerminaBackend;
-#[cfg(all(windows, not(feature = "integration")))]
-type TerminalBackend = CrosstermBackend<std::io::Stdout>;
-#[cfg(feature = "integration")]
-type TerminalBackend = TestBackend;
-
-#[cfg(not(windows))]
-type TerminalEvent = termina::Event;
-#[cfg(windows)]
 type TerminalEvent = crossterm::event::Event;
 
-type Terminal = tui::terminal::Terminal<TerminalBackend>;
+#[cfg(not(feature = "integration"))]
+type Terminal = helix_terminal::HelixTerminal;
+#[cfg(feature = "integration")]
+type Terminal = helix_terminal::TestTerminal;
 
 pub struct Application {
     terminal: Terminal,
@@ -114,17 +96,13 @@ impl Application {
         theme_parent_dirs.extend(helix_loader::runtime_dirs().iter().cloned());
         let theme_loader = theme::Loader::new(&theme_parent_dirs);
 
-        #[cfg(all(not(windows), not(feature = "integration")))]
-        let backend = TerminaBackend::new((&config.editor).into())
-            .context("failed to create terminal backend")?;
-        #[cfg(all(windows, not(feature = "integration")))]
-        let backend = CrosstermBackend::new(std::io::stdout(), (&config.editor).into());
-
+        #[cfg(not(feature = "integration"))]
+        let mut terminal = Terminal::new((&config.editor).into())
+            .context("failed to create terminal")?;
         #[cfg(feature = "integration")]
-        let backend = TestBackend::new(120, 150);
+        let mut terminal = Terminal::new(120, 150)?;
 
-        let theme_mode = backend.get_theme_mode();
-        let mut terminal = Terminal::new(backend)?;
+        let theme_mode = terminal.get_theme_mode();
         let area = terminal.size();
         let config = Arc::new(ArcSwap::from_pointee(config));
         let handlers = handlers::setup(config.clone());
@@ -396,7 +374,7 @@ impl Application {
                 self.config.store(Arc::new(app_config));
             }
             ConfigEvent::ThemeChanged => {
-                let _ = self.terminal.backend_mut().set_background_color(
+                let _ = self.terminal.set_background_color(
                     self.editor
                         .theme
                         .try_get_exact("ui.background")
@@ -475,7 +453,7 @@ impl Application {
         terminal: &mut Terminal,
         mode: Option<theme::Mode>,
     ) {
-        let true_color = terminal.backend().supports_true_color()
+        let true_color = terminal.supports_true_color()
             || config.editor.true_color
             || crate::true_color();
         let theme = config
@@ -508,9 +486,7 @@ impl Application {
             .try_get_exact("ui.background")
             .and_then(|style| style.bg);
         editor.set_theme(theme);
-        let _ = terminal
-            .backend_mut()
-            .set_background_color(background_color);
+        let _ = terminal.set_background_color(background_color);
     }
 
     #[cfg(windows)]
@@ -626,43 +602,9 @@ impl Application {
     }
 
     pub async fn handle_terminal_events(&mut self, event: std::io::Result<TerminalEvent>) {
-        #[cfg(not(windows))]
-        use termina::escape::csi;
-
         // Handle key events
         let should_redraw = match event.unwrap() {
-            #[cfg(not(windows))]
-            termina::Event::WindowResized(termina::WindowSize { rows, cols, .. }) => {
-                self.terminal
-                    .resize(Rect::new(0, 0, cols, rows))
-                    .expect("Unable to resize terminal");
-
-                let area = self.terminal.size();
-
-                self.editor.resize_layers(area);
-
-                self.editor
-                    .handle_layer_event(&Event::Resize(cols, rows), &mut self.jobs)
-            }
-            #[cfg(not(windows))]
-            // Ignore keyboard release events.
-            termina::Event::Key(termina::event::KeyEvent {
-                kind: termina::event::KeyEventKind::Release,
-                ..
-            }) => false,
-            #[cfg(not(windows))]
-            termina::Event::Csi(csi::Csi::Mode(csi::Mode::ReportTheme(mode))) => {
-                self.theme_mode = Some(mode.into());
-                Self::load_configured_theme(
-                    &mut self.editor,
-                    &self.config.load(),
-                    &mut self.terminal,
-                    self.theme_mode,
-                );
-                true
-            }
-            #[cfg(windows)]
-            TerminalEvent::Resize(width, height) => {
+            crossterm::event::Event::Resize(width, height) => {
                 self.terminal
                     .resize(Rect::new(0, 0, width, height))
                     .expect("Unable to resize terminal");
@@ -674,7 +616,6 @@ impl Application {
                 self.editor
                     .handle_layer_event(&Event::Resize(width, height), &mut self.jobs)
             }
-            #[cfg(windows)]
             // Ignore keyboard release events.
             crossterm::event::Event::Key(crossterm::event::KeyEvent {
                 kind: crossterm::event::KeyEventKind::Release,
@@ -1164,29 +1105,10 @@ impl Application {
     }
 
     fn restore_term(&mut self) -> std::io::Result<()> {
-        use helix_view::graphics::CursorKind;
-        self.terminal
-            .backend_mut()
-            .show_cursor(CursorKind::Block)
-            .ok();
         self.terminal.restore()
     }
 
-    #[cfg(all(not(feature = "integration"), not(windows)))]
-    pub fn event_stream(&self) -> impl Stream<Item = std::io::Result<TerminalEvent>> + Unpin {
-        use termina::{escape::csi, Terminal as _};
-        let reader = self.terminal.backend().terminal().event_reader();
-        termina::EventStream::new(reader, |event| {
-            // Accept either non-escape sequences or theme mode updates.
-            !event.is_escape()
-                || matches!(
-                    event,
-                    termina::Event::Csi(csi::Csi::Mode(csi::Mode::ReportTheme(_)))
-                )
-        })
-    }
-
-    #[cfg(all(not(feature = "integration"), windows))]
+    #[cfg(not(feature = "integration"))]
     pub fn event_stream(&self) -> impl Stream<Item = std::io::Result<TerminalEvent>> + Unpin {
         crossterm::event::EventStream::new()
     }
@@ -1263,7 +1185,7 @@ impl Application {
 
 impl ui::menu::Item for lsp::MessageActionItem {
     type Data = ();
-    fn format(&self, _data: &Self::Data) -> tui::widgets::Row<'_> {
-        self.title.as_str().into()
+    fn format(&self, _data: &Self::Data) -> Vec<ratatui::text::Line<'_>> {
+        vec![self.title.as_str().into()]
     }
 }

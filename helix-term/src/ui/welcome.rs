@@ -5,7 +5,7 @@ use helix_view::graphics::{CursorKind, Rect};
 use helix_view::input::KeyEvent;
 use helix_view::keyboard::KeyCode;
 use helix_view::Editor;
-use tui::buffer::Buffer as Surface;
+use ratatui::buffer::Buffer as Surface;
 
 use crate::compositor::{self, Context, EventResult};
 use crate::ui;

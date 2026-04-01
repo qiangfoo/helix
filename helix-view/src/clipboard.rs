@@ -84,7 +84,7 @@ mod external {
         #[cfg(windows)]
         Windows,
         Termux,
-        #[cfg(feature = "term")]
+
         Termcode,
         Custom(CommandProvider),
         None,
@@ -111,10 +111,7 @@ mod external {
             } else if binary_exists("pbcopy") {
                 Self::Pasteboard
             } else {
-                #[cfg(feature = "term")]
                 return Self::Termcode;
-                #[cfg(not(feature = "term"))]
-                return Self::None;
             }
         }
 
@@ -134,10 +131,8 @@ mod external {
                 Self::Tmux
             } else if binary_exists("win32yank.exe") {
                 Self::Win32Yank
-            } else if cfg!(feature = "term") {
-                Self::Termcode
             } else {
-                Self::None
+                Self::Termcode
             }
         }
     }
@@ -162,7 +157,7 @@ mod external {
                 Self::Termux => builtin_name("termux", &TERMUX),
                 #[cfg(windows)]
                 Self::Windows => "windows".into(),
-                #[cfg(feature = "term")]
+        
                 Self::Termcode => "termcode".into(),
                 Self::Custom(command_provider) => Cow::Owned(format!(
                     "custom ({})",
@@ -208,18 +203,17 @@ mod external {
                     }
                     ClipboardType::Selection => Ok(()),
                 },
-                #[cfg(feature = "term")]
+        
                 Self::Termcode => {
                     use std::io::Write;
-                    use termina::escape::osc::{self, Osc};
                     let selection = match clipboard_type {
-                        ClipboardType::Clipboard => osc::Selection::CLIPBOARD,
-                        ClipboardType::Selection => osc::Selection::PRIMARY,
+                        ClipboardType::Clipboard => "c",
+                        ClipboardType::Selection => "p",
                     };
-                    // NOTE: it would be ideal to have the terminal execute this but it _should_
-                    // work to send this over stdout instead.
+                    // OSC 52 escape sequence to set clipboard (base64 encoded)
+                    let encoded = simple_base64_encode(content.as_bytes());
                     let mut stdout = std::io::stdout().lock();
-                    write!(stdout, "{}", Osc::SetSelection(selection, content))?;
+                    write!(stdout, "\x1b]52;{};{}\x07", selection, encoded)?;
                     stdout.flush()?;
                     Ok(())
                 }
@@ -350,4 +344,29 @@ mod external {
 
         Ok(())
     }
+}
+
+/// Simple base64 encoder for OSC 52 clipboard sequences.
+fn simple_base64_encode(input: &[u8]) -> String {
+    const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::with_capacity((input.len() + 2) / 3 * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        result.push(CHARS[((n >> 18) & 0x3F) as usize] as char);
+        result.push(CHARS[((n >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            result.push(CHARS[((n >> 6) & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+        if chunk.len() > 2 {
+            result.push(CHARS[(n & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+    }
+    result
 }

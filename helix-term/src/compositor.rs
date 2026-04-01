@@ -1,7 +1,7 @@
 use helix_core::Position;
 use helix_view::graphics::{CursorKind, Rect};
 
-use tui::buffer::Buffer as Surface;
+use ratatui::buffer::Buffer as Surface;
 
 pub type Callback = Box<dyn FnOnce(&mut helix_view::Editor)>;
 pub type SyncCallback = Box<dyn FnOnce(&mut helix_view::Editor) + Sync>;

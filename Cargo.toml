@@ -4,7 +4,6 @@ members = [
   "helix-core",
   "helix-view",
   "helix-term",
-  "helix-tui",
   "helix-lsp-types",
   "helix-lsp",
   "helix-event",
@@ -31,7 +30,6 @@ opt-level = 3
 [profile.integration]
 inherits = "test"
 package.helix-core.opt-level = 2
-package.helix-tui.opt-level = 2
 package.helix-term.opt-level = 2
 
 [workspace.dependencies]
@@ -49,7 +47,8 @@ futures-executor = "0.3"
 futures-util = { version = "0.3", features = ["std", "async-await"], default-features = false }
 tokio-stream = "0.1.18"
 toml = "1.0"
-termina = "0.2"
+ratatui = { version = "0.28", default-features = false, features = ["crossterm", "underline-color"] }
+crossterm = "0.28"
 sonic-rs = "0.5"
 globset = "0.4"
 etcetera = "0.11"

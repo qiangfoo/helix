@@ -5,7 +5,7 @@ use helix_lsp::{
     Client, OffsetEncoding,
 };
 use tokio_stream::StreamExt;
-use tui::text::Span;
+use ratatui::text::Span;
 
 use super::{align_view, push_jump, Align, Context, Editor};
 

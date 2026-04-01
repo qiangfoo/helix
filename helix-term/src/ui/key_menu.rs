@@ -7,7 +7,7 @@
 
 use helix_view::graphics::{CursorKind, Rect};
 use helix_view::Editor;
-use tui::buffer::Buffer as Surface;
+use ratatui::buffer::Buffer as Surface;
 
 use crate::commands;
 use crate::compositor::{self, Callback, Component, Context, EventResult};

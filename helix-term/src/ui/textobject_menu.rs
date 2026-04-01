@@ -8,7 +8,7 @@ use helix_core::Range;
 use helix_view::graphics::{CursorKind, Rect};
 use helix_view::info::Info;
 use helix_view::Editor;
-use tui::buffer::Buffer as Surface;
+use ratatui::buffer::Buffer as Surface;
 
 use crate::compositor::{self, Callback, Component, Context, EventResult};
 use crate::layers::EditorLayers;

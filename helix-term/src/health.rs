@@ -5,10 +5,7 @@ use std::{
     collections::HashSet,
     io::{IsTerminal, Write},
 };
-use termina::{
-    style::{ColorSpec, StyleExt as _, Stylized},
-    Terminal as _,
-};
+use crossterm::style::{Color as CColor, Stylize, StyledContent, ContentStyle, Attribute};
 
 #[derive(Copy, Clone)]
 pub enum TsFeature {
@@ -186,24 +183,34 @@ fn languages(selection: Option<HashSet<String>>) -> std::io::Result<()> {
         headings.push(feat.short_title())
     }
 
-    let terminal_cols = termina::PlatformTerminal::new()
-        .and_then(|terminal| terminal.get_dimensions())
-        .map(|size| size.cols)
+    let terminal_cols = crossterm::terminal::size()
+        .map(|(cols, _)| cols)
         .unwrap_or(80);
     let column_width = terminal_cols as usize / headings.len();
     let is_terminal = std::io::stdout().is_terminal();
 
-    let fit = |s: &str| -> Stylized<'static> {
+    let fit = |s: &str| -> String {
         format!(
             "{:column_width$}",
             s.get(..column_width - 2)
                 .map(|s| format!("{}…", s))
                 .unwrap_or_else(|| s.to_string())
         )
-        .stylized()
     };
-    let color = |s: Stylized<'static>, c: ColorSpec| if is_terminal { s.foreground(c) } else { s };
-    let bold = |s: Stylized<'static>| if is_terminal { s.bold() } else { s };
+    let color = |s: String, c: CColor| -> StyledContent<String> {
+        if is_terminal {
+            StyledContent::new(ContentStyle { foreground_color: Some(c), ..Default::default() }, s)
+        } else {
+            StyledContent::new(ContentStyle::default(), s)
+        }
+    };
+    let bold = |s: String| -> StyledContent<String> {
+        if is_terminal {
+            StyledContent::new(ContentStyle { attributes: Attribute::Bold.into(), ..Default::default() }, s)
+        } else {
+            StyledContent::new(ContentStyle::default(), s)
+        }
+    };
 
     for heading in headings {
         write!(stdout, "{}", bold(fit(heading)))?;
@@ -216,10 +223,10 @@ fn languages(selection: Option<HashSet<String>>) -> std::io::Result<()> {
 
     let check_binary_with_name = |cmd: Option<(&str, &str)>| match cmd {
         Some((name, cmd)) => match helix_stdx::env::which(cmd) {
-            Ok(_) => color(fit(&format!("✓ {}", name)), ColorSpec::BRIGHT_GREEN),
-            Err(_) => color(fit(&format!("✘ {}", name)), ColorSpec::BRIGHT_RED),
+            Ok(_) => color(fit(&format!("✓ {}", name)), CColor::Green),
+            Err(_) => color(fit(&format!("✘ {}", name)), CColor::Red),
         },
-        None => color(fit("None"), ColorSpec::BRIGHT_YELLOW),
+        None => color(fit("None"), CColor::Yellow),
     };
 
     let check_binary = |cmd: Option<&str>| check_binary_with_name(cmd.map(|cmd| (cmd, cmd)));
@@ -253,8 +260,8 @@ fn languages(selection: Option<HashSet<String>>) -> std::io::Result<()> {
 
         for ts_feat in TsFeature::all() {
             match load_runtime_file(&lang.language_id, ts_feat.runtime_filename()).is_ok() {
-                true => write!(stdout, "{}", color(fit("✓"), ColorSpec::BRIGHT_GREEN))?,
-                false => write!(stdout, "{}", color(fit("✘"), ColorSpec::BRIGHT_RED))?,
+                true => write!(stdout, "{}", color(fit("✓"), CColor::Green))?,
+                false => write!(stdout, "{}", color(fit("✘"), CColor::Red))?,
             }
         }
 

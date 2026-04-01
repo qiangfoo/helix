@@ -19,14 +19,14 @@ use nucleo::pattern::{CaseMatching, Normalization};
 use nucleo::{Config, Nucleo};
 use thiserror::Error;
 use tokio::sync::mpsc::Sender;
-use tui::{
+use ratatui::{
     buffer::Buffer as Surface,
     layout::Constraint,
-    text::{Span, Spans},
-    widgets::{Block, BorderType, Cell, Row, Table},
+    text::{Line, Span},
+    widgets::{Block, BorderType, Cell, Row, Table, Widget},
 };
 
-use tui::widgets::Widget;
+use crate::buffer_ext::BufferExt;
 
 use std::{
     borrow::Cow,
@@ -46,8 +46,7 @@ use helix_core::{
 };
 use helix_view::{
     editor::Action,
-    graphics::{CursorKind, Margin, Modifier, Rect},
-    theme::Style,
+    graphics::{CursorKind, Margin, Modifier, Rect, RectExt},
     view::ViewPosition,
     Document, AppId, Editor,
 };
@@ -184,7 +183,7 @@ impl<T, D> Injector<T, D> {
     }
 }
 
-type ColumnFormatFn<T, D> = for<'a> fn(&'a T, &'a D) -> Cell<'a>;
+type ColumnFormatFn<T, D> = for<'a> fn(&'a T, &'a D) -> Line<'a>;
 
 pub struct Column<T, D> {
     name: Arc<str>,
@@ -223,12 +222,18 @@ impl<T, D> Column<T, D> {
         self
     }
 
-    fn format<'a>(&self, item: &'a T, data: &'a D) -> Cell<'a> {
+    fn format_line<'a>(&self, item: &'a T, data: &'a D) -> Line<'a> {
         (self.format)(item, data)
     }
 
+    #[allow(dead_code)]
+    fn format<'a>(&self, item: &'a T, data: &'a D) -> Cell<'a> {
+        Cell::from(self.format_line(item, data))
+    }
+
     fn format_text<'a>(&self, item: &'a T, data: &'a D) -> Cow<'a, str> {
-        let text: String = self.format(item, data).content.into();
+        let line = self.format_line(item, data);
+        let text: String = line.spans.into_iter().map(|s| s.content).collect();
         text.into()
     }
 }
@@ -755,10 +760,10 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
 
             // Separator
             let sep_style = cx.editor.theme.get("ui.background.separator");
-            let borders = BorderType::line_symbols(BorderType::Plain);
+            let borders = BorderType::border_symbols(BorderType::Plain);
             for x in inner.left()..inner.right() {
-                if let Some(cell) = surface.get_mut(x, inner.y + 1) {
-                    cell.set_symbol(borders.horizontal).set_style(sep_style);
+                if let Some(cell) = surface.cell_mut((x, inner.y + 1)) {
+                    cell.set_symbol(borders.horizontal_top).set_style(sep_style);
                 }
             }
 
@@ -780,10 +785,10 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
 
             // -- Separator
             let sep_style = cx.editor.theme.get("ui.background.separator");
-            let borders = BorderType::line_symbols(BorderType::Plain);
+            let borders = BorderType::border_symbols(BorderType::Plain);
             for x in inner.left()..inner.right() {
-                if let Some(cell) = surface.get_mut(x, inner.y + 1) {
-                    cell.set_symbol(borders.horizontal).set_style(sep_style);
+                if let Some(cell) = surface.cell_mut((x, inner.y + 1)) {
+                    cell.set_symbol(borders.horizontal_top).set_style(sep_style);
                 }
             }
 
@@ -817,8 +822,8 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
                 let Some(Constraint::Length(max_width)) = widths.next() else {
                     unreachable!();
                 };
-                let mut cell = column.format(item.data, &self.editor_data);
-                let width = if column.filter {
+                let original_line = column.format_line(item.data, &self.editor_data);
+                let (cell, width) = if column.filter {
                     snapshot.pattern().column_pattern(matcher_index).indices(
                         item.matcher_columns[matcher_index].slice(..),
                         &mut matcher,
@@ -830,13 +835,11 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
                     let mut next_highlight_idx = indices.next().unwrap_or(u32::MAX);
                     let mut span_list = Vec::new();
                     let mut current_span = String::new();
-                    let mut current_style = Style::default();
+                    let mut current_style = ratatui::style::Style::default();
                     let mut grapheme_idx = 0u32;
                     let mut width = 0;
 
-                    let spans: &[Span] =
-                        cell.content.lines.first().map_or(&[], |it| it.0.as_slice());
-                    for span in spans {
+                    for span in &original_line.spans {
                         // this looks like a bug on first glance, we are iterating
                         // graphemes but treating them as char indices. The reason that
                         // this is correct is that nucleo will only ever consider the first char
@@ -845,7 +848,7 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
                         for grapheme in span.content.graphemes(true) {
                             let style = if grapheme_idx == next_highlight_idx {
                                 next_highlight_idx = indices.next().unwrap_or(u32::MAX);
-                                span.style.patch(highlight_style)
+                                span.style.patch(ratatui::style::Style::from(highlight_style))
                             } else {
                                 span.style
                             };
@@ -863,15 +866,11 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
                     }
 
                     span_list.push(Span::styled(current_span, current_style));
-                    cell = Cell::from(Spans::from(span_list));
                     matcher_index += 1;
-                    width
+                    (Cell::from(Line::from(span_list)), width)
                 } else {
-                    cell.content
-                        .lines
-                        .first()
-                        .map(|line| line.width())
-                        .unwrap_or_default()
+                    let width = original_line.width();
+                    (Cell::from(original_line), width)
                 };
 
                 if width as u16 > *max_width {
@@ -882,12 +881,12 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
             }))
         });
 
-        let mut table = Table::new(options)
+        let options: Vec<Row> = options.collect();
+        let mut table = Table::new(options, &self.widths)
             .style(text_style)
             .highlight_style(selected)
             .highlight_symbol(" > ")
-            .column_spacing(1)
-            .widths(&self.widths);
+            .column_spacing(1);
 
         // -- Header
         if self.columns.iter().filter(|c| c.filter).count() > 1 {
@@ -914,17 +913,12 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
             );
         }
 
-        use tui::widgets::TableState;
+        use ratatui::widgets::{StatefulWidget, TableState};
 
-        table.render_table(
-            inner,
-            surface,
-            &mut TableState {
-                offset: 0,
-                selected: Some(cursor as usize),
-            },
-            self.truncate_start,
-        );
+        let mut table_state = TableState::new()
+            .with_offset(0)
+            .with_selected(Some(cursor as usize));
+        StatefulWidget::render(table, inner, surface, &mut table_state);
     }
 
     fn render_preview(&mut self, area: Rect, surface: &mut Surface, cx: &mut Context) {
@@ -940,7 +934,7 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
         // calculate the inner area inside the box
         let inner = BLOCK.inner(area);
         // 1 column gap on either side
-        let margin = Margin::horizontal(1);
+        let margin = Margin::new(1, 0);
         let inner = inner.inner(margin);
         BLOCK.render(area, surface);
 

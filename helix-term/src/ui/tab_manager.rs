@@ -6,11 +6,11 @@ use arc_swap::ArcSwap;
 use helix_core::unicode::width::UnicodeWidthStr;
 use helix_view::{
     document::SCRATCH_BUFFER_NAME,
-    graphics::{Color, CursorKind, Rect},
+    graphics::{Color, CursorKind, Rect, RectExt},
     input::{MouseButton, MouseEventKind},
     Editor,
 };
-use tui::buffer::Buffer as Surface;
+use ratatui::buffer::Buffer as Surface;
 
 use crate::commands;
 use crate::compositor::{self, Component, Context, EventResult};

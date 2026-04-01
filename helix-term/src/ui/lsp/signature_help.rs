@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use helix_core::syntax::{self, OverlayHighlights};
-use helix_view::graphics::{Margin, Rect, Style};
+use helix_view::graphics::{Margin, Rect, RectExt, Style};
 use helix_view::input::Event;
-use tui::buffer::Buffer;
-use tui::layout::Alignment;
-use tui::text::Text;
-use tui::widgets::{BorderType, Paragraph, Widget, Wrap};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Alignment;
+use ratatui::text::Text;
+use ratatui::widgets::{BorderType, Paragraph, Widget, Wrap};
 
 use crate::compositor::{Component, Context, EventResult};
 
@@ -95,7 +95,7 @@ impl Component for SignatureHelp {
     }
 
     fn render(&mut self, area: Rect, surface: &mut Buffer, cx: &mut Context) {
-        let margin = Margin::all(1);
+        let margin = Margin::new(1, 1);
         let area = area.inner(margin);
 
         let signature = self
@@ -128,14 +128,14 @@ impl Component for SignatureHelp {
         if self.signatures.len() > 1 {
             let signature_index = self.signature_index();
             let text = Text::from(signature_index);
-            let paragraph = Paragraph::new(&text).alignment(Alignment::Right);
+            let paragraph = Paragraph::new(text).alignment(Alignment::Right);
             paragraph.render(area.with_height(1).clip_right(1), surface);
         }
 
-        let sig_text_para = Paragraph::new(&sig_text)
+        let (_, sig_text_height) = crate::ui::text::required_size(&sig_text, area.width);
+        let sig_text_para = Paragraph::new(sig_text)
             .wrap(Wrap { trim: false })
             .scroll((cx.scroll.unwrap_or_default() as u16, 0));
-        let (_, sig_text_height) = sig_text_para.required_size(area.width);
         let sig_text_area = area.with_height(sig_text_height.min(area.height));
         let sig_text_area = sig_text_area.intersection(surface.area);
         sig_text_para.render(sig_text_area, surface);
@@ -145,10 +145,10 @@ impl Component for SignatureHelp {
         }
 
         let sep_style = Style::default();
-        let borders = BorderType::line_symbols(BorderType::Plain);
+        let borders = BorderType::border_symbols(BorderType::Plain);
         for x in sig_text_area.left()..sig_text_area.right() {
-            if let Some(cell) = surface.get_mut(x, sig_text_area.bottom()) {
-                cell.set_symbol(borders.horizontal).set_style(sep_style);
+            if let Some(cell) = surface.cell_mut((x, sig_text_area.bottom())) {
+                cell.set_symbol(borders.horizontal_top).set_style(sep_style);
             }
         }
 
@@ -160,7 +160,7 @@ impl Component for SignatureHelp {
         let sig_doc_area = area
             .clip_top(sig_text_area.height + 2)
             .clip_bottom(u16::from(cx.editor.popup_border()));
-        let sig_doc_para = Paragraph::new(&sig_doc)
+        let sig_doc_para = Paragraph::new(sig_doc)
             .wrap(Wrap { trim: false })
             .scroll((cx.scroll.unwrap_or_default() as u16, 0));
         sig_doc_para.render(sig_doc_area, surface);
@@ -184,8 +184,7 @@ impl Component for SignatureHelp {
             &self.config_loader.load(),
             None,
         );
-        let sig_text_para = Paragraph::new(&signature_text).wrap(Wrap { trim: false });
-        let (sig_width, sig_height) = sig_text_para.required_size(max_text_width);
+        let (sig_width, sig_height) = crate::ui::text::required_size(&signature_text, max_text_width);
 
         let (width, height) = match signature.signature_doc {
             Some(ref doc) => {

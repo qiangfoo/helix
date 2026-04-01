@@ -1,9 +1,11 @@
 use crate::compositor::{Component, Context};
 use helix_view::graphics::{Margin, Rect};
 use helix_view::info::Info;
-use tui::buffer::Buffer as Surface;
-use tui::text::Text;
-use tui::widgets::{Block, Paragraph, Widget};
+use ratatui::buffer::Buffer as Surface;
+use ratatui::text::Text;
+use ratatui::widgets::{Block, Paragraph, Widget};
+
+use crate::buffer_ext::BufferExt;
 
 impl Component for Info {
     fn render(&mut self, viewport: Rect, surface: &mut Surface, cx: &mut Context) {
@@ -27,11 +29,11 @@ impl Component for Info {
             .title(self.title.as_ref())
             .border_style(popup_style);
 
-        let margin = Margin::horizontal(1);
+        let margin = Margin::new(1, 0);
         let inner = block.inner(area).inner(margin);
         block.render(area, surface);
 
-        Paragraph::new(&Text::from(self.text.as_str()))
+        Paragraph::new(Text::from(self.text.as_str()))
             .style(text_style)
             .render(inner, surface);
     }

@@ -41,7 +41,7 @@ pub use spinner::{ProgressSpinners, Spinner};
 pub use text::Text;
 
 use helix_view::{Document, Editor};
-use tui::text::{Span, Spans};
+use ratatui::text::{Span, Line};
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -292,7 +292,7 @@ pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
                 .expect("normalized paths can't end in `..`")
                 .to_string_lossy();
             spans.push(Span::raw(filename));
-            Spans::from(spans).into()
+            Line::from(spans)
         },
     ));
     let path_column = if config.icons { 1 } else { 0 };
@@ -384,7 +384,7 @@ pub fn file_explorer(root: PathBuf, editor: &Editor) -> Result<FileExplorer, std
             if *is_dir {
                 Span::styled(format!("{}/", name), data.directory_style).into()
             } else {
-                name.into()
+                Line::from(name.into_owned())
             }
         },
     ));
@@ -511,7 +511,7 @@ pub mod completers {
     use once_cell::sync::Lazy;
     use std::borrow::Cow;
     use std::collections::BTreeSet;
-    use tui::text::Span;
+    use ratatui::text::Span;
 
     pub type Completer = fn(&Editor, &str) -> Vec<Completion>;
 

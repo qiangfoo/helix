@@ -3,10 +3,10 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use helix_core::syntax;
 use helix_lsp::lsp;
-use helix_view::graphics::{Margin, Rect, Style};
+use helix_view::graphics::{Margin, Rect, RectExt, Style};
 use helix_view::input::Event;
-use tui::buffer::Buffer;
-use tui::widgets::{BorderType, Paragraph, Widget, Wrap};
+use ratatui::buffer::Buffer;
+use ratatui::widgets::{BorderType, Paragraph, Widget, Wrap};
 
 use crate::compositor::{Component, Context, EventResult};
 
@@ -72,7 +72,7 @@ const SEPARATOR_HEIGHT: u16 = 1;
 
 impl Component for Hover {
     fn render(&mut self, area: Rect, surface: &mut Buffer, cx: &mut Context) {
-        let margin = Margin::all(1);
+        let margin = Margin::new(1, 1);
         let area = area.inner(margin);
 
         let (header, contents) = self.content();
@@ -81,15 +81,15 @@ impl Component for Hover {
         if let Some(header) = header {
             // header LSP Name
             let header = header.parse(Some(&cx.editor.theme));
-            let header = Paragraph::new(&header);
+            let header = Paragraph::new(header);
             header.render(area.with_height(HEADER_HEIGHT), surface);
 
             // border
             let sep_style = Style::default();
-            let borders = BorderType::line_symbols(BorderType::Plain);
+            let borders = BorderType::border_symbols(BorderType::Plain);
             for x in area.left()..area.right() {
-                if let Some(cell) = surface.get_mut(x, area.top() + HEADER_HEIGHT) {
-                    cell.set_symbol(borders.horizontal).set_style(sep_style);
+                if let Some(cell) = surface.cell_mut((x, area.top() + HEADER_HEIGHT)) {
+                    cell.set_symbol(borders.horizontal_top).set_style(sep_style);
                 }
             }
         }
@@ -101,7 +101,7 @@ impl Component for Hover {
         } else {
             0
         });
-        let contents_para = Paragraph::new(&contents)
+        let contents_para = Paragraph::new(contents)
             .wrap(Wrap { trim: false })
             .scroll((cx.scroll.unwrap_or_default() as u16, 0));
         contents_para.render(contents_area, surface);

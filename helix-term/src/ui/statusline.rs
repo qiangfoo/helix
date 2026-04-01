@@ -4,7 +4,7 @@ use helix_lsp::lsp::DiagnosticSeverity;
 use helix_view::document::DEFAULT_LANGUAGE_NAME;
 use helix_view::{
     document::{Mode, SCRATCH_BUFFER_NAME},
-    graphics::Rect,
+    graphics::{Rect, RectExt},
     theme::Style,
     Document, Editor, View,
 };
@@ -12,8 +12,8 @@ use helix_view::{
 use crate::ui::ProgressSpinners;
 
 use helix_view::editor::StatusLineElement as StatusLineElementID;
-use tui::buffer::Buffer as Surface;
-use tui::text::{Span, Spans};
+use ratatui::buffer::Buffer as Surface;
+use ratatui::text::{Span, Line};
 
 pub struct RenderContext<'a> {
     pub editor: &'a Editor,
@@ -45,9 +45,9 @@ impl<'a> RenderContext<'a> {
 
 #[derive(Default)]
 pub struct RenderBuffer<'a> {
-    pub left: Spans<'a>,
-    pub center: Spans<'a>,
-    pub right: Spans<'a>,
+    pub left: Line<'a>,
+    pub center: Line<'a>,
+    pub right: Line<'a>,
 }
 
 pub fn render(context: &mut RenderContext, viewport: Rect, surface: &mut Surface) {
@@ -70,7 +70,7 @@ pub fn render(context: &mut RenderContext, viewport: Rect, surface: &mut Surface
         });
     }
 
-    surface.set_spans(
+    surface.set_line(
         viewport.x,
         viewport.y,
         &context.parts.left,
@@ -86,7 +86,7 @@ pub fn render(context: &mut RenderContext, viewport: Rect, surface: &mut Surface
         })
     }
 
-    surface.set_spans(
+    surface.set_line(
         viewport.x
             + viewport
                 .width
@@ -112,7 +112,7 @@ pub fn render(context: &mut RenderContext, viewport: Rect, surface: &mut Surface
     let center_max_width = viewport.width.saturating_sub(2 * edge_width + 2 * spacing);
     let center_width = center_max_width.min(context.parts.center.width() as u16);
 
-    surface.set_spans(
+    surface.set_line(
         viewport.x + viewport.width / 2 - center_width / 2,
         viewport.y,
         &context.parts.center,
@@ -120,9 +120,9 @@ pub fn render(context: &mut RenderContext, viewport: Rect, surface: &mut Surface
     );
 }
 
-fn append<'a>(buffer: &mut Spans<'a>, mut span: Span<'a>, base_style: Style) {
-    span.style = base_style.patch(span.style);
-    buffer.0.push(span);
+fn append<'a>(buffer: &mut Line<'a>, mut span: Span<'a>, base_style: Style) {
+    span.style = ratatui::style::Style::from(base_style).patch(span.style);
+    buffer.spans.push(span);
 }
 
 fn get_render_function<'a, F>(element_id: StatusLineElementID) -> impl Fn(&mut RenderContext<'a>, F)

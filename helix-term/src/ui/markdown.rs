@@ -1,8 +1,8 @@
 use crate::compositor::{Component, Context};
 use arc_swap::ArcSwap;
-use tui::{
+use ratatui::{
     buffer::Buffer as Surface,
-    text::{Span, Spans, Text},
+    text::{Span, Line, Text},
 };
 
 use std::sync::Arc;
@@ -23,7 +23,7 @@ fn styled_multiline_text<'a>(text: &str, style: Style) -> Text<'a> {
     let spans: Vec<_> = text
         .lines()
         .map(|line| Span::styled(line.to_string(), style))
-        .map(Spans::from)
+        .map(Line::from)
         .collect();
     Text::from(spans)
 }
@@ -120,7 +120,7 @@ pub fn highlighted_code_block<'a>(
 
             // make a new line
             let spans = std::mem::take(&mut spans);
-            lines.push(Spans::from(spans));
+            lines.push(Line::from(spans));
         }
 
         if !slice.is_empty() {
@@ -131,7 +131,7 @@ pub fn highlighted_code_block<'a>(
 
     if !spans.is_empty() {
         let spans = std::mem::take(&mut spans);
-        lines.push(Spans::from(spans));
+        lines.push(Line::from(spans));
     }
 
     Text::from(lines)
@@ -169,11 +169,11 @@ impl Markdown {
         }
     }
 
-    pub fn parse(&self, theme: Option<&Theme>) -> tui::text::Text<'_> {
-        fn push_line<'a>(spans: &mut Vec<Span<'a>>, lines: &mut Vec<Spans<'a>>) {
+    pub fn parse(&self, theme: Option<&Theme>) -> Text<'_> {
+        fn push_line<'a>(spans: &mut Vec<Span<'a>>, lines: &mut Vec<Line<'a>>) {
             let spans = std::mem::take(spans);
             if !spans.is_empty() {
-                lines.push(Spans::from(spans));
+                lines.push(Line::from(spans));
             }
         }
 
@@ -239,7 +239,7 @@ impl Markdown {
 
                     // whenever top-level list closes, empty line
                     if list_stack.is_empty() {
-                        lines.push(Spans::default());
+                        lines.push(Line::default());
                     }
                 }
                 Event::Start(Tag::Item) => {
@@ -288,7 +288,7 @@ impl Markdown {
                     // whenever heading, code block or paragraph closes, empty line
                     match tag {
                         TagEnd::Heading(_) | TagEnd::Paragraph | TagEnd::CodeBlock => {
-                            lines.push(Spans::default());
+                            lines.push(Line::default());
                         }
                         _ => (),
                     }
@@ -339,8 +339,8 @@ impl Markdown {
                     }
                 }
                 Event::Rule => {
-                    lines.push(Spans::from(Span::styled("───", rule_style)));
-                    lines.push(Spans::default());
+                    lines.push(Line::from(Span::styled("───", rule_style)));
+                    lines.push(Line::default());
                 }
                 // TaskListMarker(bool) true if checked
                 _ => {
@@ -351,12 +351,12 @@ impl Markdown {
         }
 
         if !spans.is_empty() {
-            lines.push(Spans::from(spans));
+            lines.push(Line::from(spans));
         }
 
         // if last line is empty, remove it
         if let Some(line) = lines.last() {
-            if line.0.is_empty() {
+            if line.spans.is_empty() {
                 lines.pop();
             }
         }
@@ -367,15 +367,15 @@ impl Markdown {
 
 impl Component for Markdown {
     fn render(&mut self, area: Rect, surface: &mut Surface, cx: &mut Context) {
-        use tui::widgets::{Paragraph, Widget, Wrap};
+        use ratatui::widgets::{Paragraph, Widget, Wrap};
 
         let text = self.parse(Some(&cx.editor.theme));
 
-        let par = Paragraph::new(&text)
+        let par = Paragraph::new(text)
             .wrap(Wrap { trim: false })
             .scroll((cx.scroll.unwrap_or_default() as u16, 0));
 
-        let margin = Margin::all(1);
+        let margin = Margin::new(1, 1);
         par.render(area.inner(margin), surface);
     }
 

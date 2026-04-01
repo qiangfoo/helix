@@ -8,16 +8,17 @@ use helix_view::keyboard::KeyCode;
 use helix_view::Editor;
 use std::sync::Arc;
 use std::{borrow::Cow, ops::RangeFrom};
-use tui::buffer::Buffer as Surface;
-use tui::text::Span;
-use tui::widgets::{Block, Widget};
+use crate::buffer_ext::BufferExt;
+use ratatui::buffer::Buffer as Surface;
+use ratatui::text::Span;
+use ratatui::widgets::{Block, Widget};
 
 use helix_core::{
     unicode::segmentation::{GraphemeCursor, UnicodeSegmentation},
     unicode::width::UnicodeWidthStr,
     Position,
 };
-use helix_view::graphics::{CursorKind, Margin, Rect};
+use helix_view::graphics::{CursorKind, Margin, Rect, RectExt};
 
 type PromptCharHandler = Box<dyn Fn(&mut Prompt, char, &Context)>;
 
@@ -455,7 +456,7 @@ impl Prompt {
                 let completion_item_style = if is_selected {
                     selected_color
                 } else {
-                    completion_color.patch(completion.style)
+                    completion_color.patch(helix_view::graphics::Style::from(completion.style))
                 };
 
                 surface.set_stringn(
@@ -498,7 +499,7 @@ impl Prompt {
                 // .title(self.title.as_str())
                 .border_style(background);
 
-            let inner = block.inner(area).inner(Margin::horizontal(1));
+            let inner = block.inner(area).inner(Margin::new(1, 0));
 
             block.render(area, surface);
             text.render(inner, surface, cx);

@@ -10,10 +10,7 @@ use helix_stdx::{
 use helix_vcs::{CommitInfo, Hunk};
 pub use lsp::*;
 pub use syntax::*;
-use tui::{
-    text::{Span, Spans},
-    widgets::Cell,
-};
+use ratatui::text::{Span, Line};
 pub use typed::*;
 
 use helix_core::{
@@ -1797,12 +1794,12 @@ fn global_search(cx: &mut Context) {
                 .expect("global search paths are normalized (can't end in `..`)")
                 .to_string_lossy();
 
-            Cell::from(Spans::from(vec![
+            Line::from(vec![
                 Span::styled(directories, config.directory_style),
                 Span::raw(filename),
                 Span::styled(":", config.colon_style),
                 Span::styled((item.line_start + 1).to_string(), config.number_style),
-            ]))
+            ])
         }),
         PickerColumn::hidden("contents"),
     ];

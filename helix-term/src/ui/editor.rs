@@ -23,14 +23,14 @@ use helix_view::{
     annotations::diagnostics::DiagnosticFilter,
     document::{Mode, SCRATCH_BUFFER_NAME},
     editor::CursorShapeConfig,
-    graphics::{Color, CursorKind, Rect, Style},
+    graphics::{Color, CursorKind, Rect, RectExt, Style},
     input::{KeyEvent, MouseButton, MouseEvent, MouseEventKind},
     keyboard::{KeyCode, KeyModifiers},
     Document, Editor, Theme, View,
 };
 use std::{mem::take, num::NonZeroUsize, ops, path::PathBuf, rc::Rc};
 
-use tui::{buffer::Buffer as Surface, text::Span};
+use ratatui::{buffer::Buffer as Surface, text::Span};
 
 pub struct EditorView {
     app_id: crate::ui::app::AppId,
@@ -179,7 +179,7 @@ impl EditorView {
             let border_style = theme.get("ui.window");
             for y in area.top()..area.bottom() {
                 surface[(x, y)]
-                    .set_symbol(tui::symbols::line::VERTICAL)
+                    .set_symbol(ratatui::symbols::line::VERTICAL)
                     //.set_symbol(" ")
                     .set_style(border_style);
             }
@@ -672,7 +672,7 @@ impl EditorView {
         theme: &Theme,
     ) {
         use helix_core::diagnostic::Severity;
-        use tui::{
+        use ratatui::{
             layout::Alignment,
             text::Text,
             widgets::{Paragraph, Widget, Wrap},
@@ -716,7 +716,7 @@ impl EditorView {
         }
 
         let text = Text::from(lines);
-        let paragraph = Paragraph::new(&text)
+        let paragraph = Paragraph::new(text)
             .alignment(Alignment::Right)
             .wrap(Wrap { trim: true });
         let width = 100.min(viewport.width);

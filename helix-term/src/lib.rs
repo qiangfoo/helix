@@ -3,6 +3,7 @@ extern crate helix_view;
 
 pub mod application;
 pub mod args;
+pub mod buffer_ext;
 pub mod commands;
 pub mod compositor;
 pub mod config;
@@ -12,6 +13,7 @@ pub mod job;
 pub mod keymap;
 pub mod layers;
 pub mod session;
+pub mod terminal;
 pub mod ui;
 
 #[cfg(not(windows))]

@@ -2,18 +2,20 @@ use crate::{
     compositor::{Callback, Component, Context, Event, EventResult},
     ctrl, key, shift,
 };
-use tui::{buffer::Buffer as Surface, widgets::Table};
+use crate::buffer_ext::BufferExt;
+use ratatui::{buffer::Buffer as Surface, widgets::Table};
 
-pub use tui::widgets::{Cell, Row};
+pub use ratatui::widgets::{Cell, Row};
+use ratatui::text::Line;
 
-use helix_view::{graphics::Rect, Editor};
-use tui::layout::Constraint;
+use helix_view::{graphics::{Rect, RectExt}, Editor};
+use ratatui::layout::Constraint;
 
 pub trait Item: Sync + Send + 'static {
     /// Additional editor state that is used for label calculation.
     type Data: Sync + Send + 'static;
 
-    fn format(&self, data: &Self::Data) -> Row<'_>;
+    fn format(&self, data: &Self::Data) -> Vec<Line<'_>>;
 }
 
 pub type MenuCallback<T> = Box<dyn Fn(&mut Editor, Option<&T>, MenuEvent)>;
@@ -138,13 +140,13 @@ impl<T: Item> Menu<T> {
         let n = self
             .options
             .first()
-            .map(|option| option.format(&self.editor_data).cells.len())
+            .map(|option| option.format(&self.editor_data).len())
             .unwrap_or_default();
         let max_lens = self.options.iter().fold(vec![0; n], |mut acc, option| {
-            let row = option.format(&self.editor_data);
+            let lines = option.format(&self.editor_data);
             // maintain max for each column
-            for (acc, cell) in acc.iter_mut().zip(row.cells.iter()) {
-                let width = cell.content.width();
+            for (acc, line) in acc.iter_mut().zip(lines.iter()) {
+                let width = line.width();
                 if width > *acc {
                     *acc = width;
                 }
@@ -341,23 +343,22 @@ impl<T: Item + 'static> Component for Menu<T> {
 
         let rows = options
             .iter()
-            .map(|option| option.format(&self.editor_data));
-        let table = Table::new(rows)
+            .map(|option| Row::new(option.format(&self.editor_data)));
+        let table = Table::new(rows, &self.widths)
             .style(style)
             .highlight_style(selected)
-            .column_spacing(1)
-            .widths(&self.widths);
+            .column_spacing(1);
 
-        use tui::widgets::TableState;
+        use ratatui::widgets::{StatefulWidget, TableState};
 
-        table.render_table(
+        let mut table_state = TableState::new()
+            .with_offset(scroll)
+            .with_selected(self.cursor);
+        StatefulWidget::render(
+            table,
             area.clip_left(Self::LEFT_PADDING as u16).clip_right(1),
             surface,
-            &mut TableState {
-                offset: scroll,
-                selected: self.cursor,
-            },
-            false,
+            &mut table_state,
         );
 
         let render_borders = cx.editor.menu_border();
@@ -392,11 +393,11 @@ impl<T: Item + 'static> Component for Menu<T> {
                 if scroll_line <= i && i < scroll_line + scroll_height {
                     // Draw scroll thumb
                     cell.set_symbol(half_block);
-                    cell.set_fg(scroll_style.fg.unwrap_or(helix_view::theme::Color::Reset));
+                    cell.set_fg(scroll_style.fg.unwrap_or(helix_view::theme::Color::Reset).into());
                 } else if !render_borders {
                     // Draw scroll track
                     cell.set_symbol(half_block);
-                    cell.set_fg(scroll_style.bg.unwrap_or(helix_view::theme::Color::Reset));
+                    cell.set_fg(scroll_style.bg.unwrap_or(helix_view::theme::Color::Reset).into());
                 }
             }
         }

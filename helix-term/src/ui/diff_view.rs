@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use helix_core::text_annotations::TextAnnotations;
 use helix_core::Rope;
-use helix_view::graphics::{Color, CursorKind, Rect};
+use helix_view::graphics::{Color, CursorKind, Rect, RectExt};
 use helix_view::input::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use helix_view::keyboard::{KeyCode, KeyModifiers};
 use helix_view::theme::Style;
@@ -18,7 +18,7 @@ fn dim_color(color: Color) -> Color {
         _ => color,
     }
 }
-use tui::buffer::Buffer as Surface;
+use ratatui::buffer::Buffer as Surface;
 
 use helix_vcs::{DiffLineKind, FileDiff};
 

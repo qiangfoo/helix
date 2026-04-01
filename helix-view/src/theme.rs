@@ -41,16 +41,6 @@ pub enum Mode {
     Light,
 }
 
-#[cfg(feature = "term")]
-impl From<termina::escape::csi::ThemeMode> for Mode {
-    fn from(mode: termina::escape::csi::ThemeMode) -> Self {
-        match mode {
-            termina::escape::csi::ThemeMode::Dark => Self::Dark,
-            termina::escape::csi::ThemeMode::Light => Self::Light,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     light: String,

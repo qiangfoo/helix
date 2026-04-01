@@ -1,7 +1,8 @@
 use std::borrow::Cow;
 
-use helix_view::{graphics::Rect, Editor};
-use tui::{
+use helix_view::{graphics::{Rect, RectExt}, Editor};
+use crate::buffer_ext::BufferExt;
+use ratatui::{
     buffer::Buffer as Surface,
     widgets::{Block, Widget as _},
 };
@@ -22,7 +23,7 @@ impl<T: Item> Select<T> {
         I: IntoIterator<Item = T>,
         F: Fn(&mut Editor, &T, PromptEvent) + 'static,
     {
-        let message = tui::text::Text::from(message.into()).into();
+        let message = ratatui::text::Text::from(message.into()).into();
         let options: Vec<_> = options.into_iter().collect();
         assert!(!options.is_empty());
         let mut menu = Menu::new(options, data, move |editor, option, event| {

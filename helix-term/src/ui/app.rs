@@ -6,7 +6,7 @@ use arc_swap::ArcSwap;
 use helix_core::Position;
 use helix_view::graphics::{CursorKind, Rect};
 use helix_view::Editor;
-use tui::buffer::Buffer as Surface;
+use ratatui::buffer::Buffer as Surface;
 
 use crate::compositor::{Context, EventResult};
 use crate::config::Config;

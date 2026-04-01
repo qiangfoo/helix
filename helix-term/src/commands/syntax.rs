@@ -5,6 +5,8 @@ use std::{
     sync::Arc,
 };
 
+use ratatui::text::Line;
+
 use dashmap::DashMap;
 use futures_util::FutureExt;
 use grep_regex::RegexMatcherBuilder;
@@ -259,7 +261,7 @@ pub fn syntax_workspace_symbol_picker(cx: &mut Context) {
                         } else {
                             path
                         };
-                        path.to_string_lossy().into()
+                        Line::from(path.to_string_lossy().into_owned())
                     } else {
                         uri.to_string().into()
                     }

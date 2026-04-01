@@ -1,9 +1,9 @@
 use helix_core::Position;
 use helix_view::{
-    graphics::{CursorKind, Rect},
+    graphics::{CursorKind, Rect, RectExt},
     Editor,
 };
-use tui::buffer::Buffer;
+use ratatui::buffer::Buffer;
 
 use crate::compositor::{Component, Context, Event, EventResult};
 

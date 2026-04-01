@@ -4,10 +4,7 @@ use helix_term::application::Application;
 use helix_view::input::parse_macro;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-#[cfg(windows)]
 use crossterm::event::{Event, KeyEvent};
-#[cfg(not(windows))]
-use termina::event::{Event, KeyEvent};
 
 use super::*;
 
