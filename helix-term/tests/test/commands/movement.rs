@@ -419,3 +419,67 @@ async fn match_bracket() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_goto_file_start_end() -> anyhow::Result<()> {
+    let tests = vec![
+        // gg: cursor in middle moves to first char
+        (
+            indoc! {"\
+                line one
+                line #[t|]#wo
+                line three
+            "},
+            "gg",
+            indoc! {"\
+                #[l|]#ine one
+                line two
+                line three
+            "},
+        ),
+        // gg: cursor already at first line stays at first char
+        (
+            indoc! {"\
+                line #[o|]#ne
+                line two
+            "},
+            "gg",
+            indoc! {"\
+                #[l|]#ine one
+                line two
+            "},
+        ),
+        // ge: cursor at first line moves to last content line
+        (
+            indoc! {"\
+                #[l|]#ine one
+                line two
+                line three
+            "},
+            "ge",
+            indoc! {"\
+                line one
+                line two
+                #[l|]#ine three
+            "},
+        ),
+        // ge: trailing blank line — moves to line before the blank line
+        (
+            indoc! {"\
+                #[l|]#ine one
+                line two
+            "},
+            "ge",
+            indoc! {"\
+                line one
+                #[l|]#ine two
+            "},
+        ),
+    ];
+
+    for test in tests {
+        test_with_config(AppBuilder::new(), test).await?;
+    }
+
+    Ok(())
+}

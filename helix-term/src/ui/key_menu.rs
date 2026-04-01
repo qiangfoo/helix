@@ -89,6 +89,14 @@ impl Component for KeyMenu {
 
                 let mut callbacks = std::mem::take(&mut cx.callback);
 
+                // Ensure the viewport scrolls to follow the cursor,
+                // mirroring what EditorView does after command execution.
+                if !cx.editor.should_close() {
+                    let config = cx.editor.config();
+                    let (view, doc) = current!(cx.editor);
+                    view.ensure_cursor_in_view(doc, config.scrolloff);
+                }
+
                 if !self.sticky {
                     // Pop self
                     callbacks.push(Box::new(|editor: &mut Editor| {
@@ -135,6 +143,13 @@ impl Component for KeyMenu {
                 }
 
                 let mut callbacks = std::mem::take(&mut cx.callback);
+
+                if !cx.editor.should_close() {
+                    let config = cx.editor.config();
+                    let (view, doc) = current!(cx.editor);
+                    view.ensure_cursor_in_view(doc, config.scrolloff);
+                }
+
                 if !self.sticky {
                     callbacks.push(Box::new(|editor: &mut Editor| {
                         editor.remove_layer(ID);
