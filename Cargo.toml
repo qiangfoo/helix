@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
   "helix-core",
-  "helix-view",
   "helix-term",
   "helix-lsp-types",
   "helix-lsp",

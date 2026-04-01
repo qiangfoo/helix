@@ -1,10 +1,10 @@
 use helix_core::Position;
-use helix_view::graphics::{CursorKind, Rect};
+use crate::view::graphics::{CursorKind, Rect};
 
 use ratatui::buffer::Buffer as Surface;
 
-pub type Callback = Box<dyn FnOnce(&mut helix_view::Editor)>;
-pub type SyncCallback = Box<dyn FnOnce(&mut helix_view::Editor) + Sync>;
+pub type Callback = Box<dyn FnOnce(&mut crate::view::Editor)>;
+pub type SyncCallback = Box<dyn FnOnce(&mut crate::view::Editor) + Sync>;
 
 // Cursive-inspired
 pub enum EventResult {
@@ -13,9 +13,9 @@ pub enum EventResult {
 }
 
 use crate::job::Jobs;
-use helix_view::Editor;
+use crate::view::Editor;
 
-pub use helix_view::input::Event;
+pub use crate::view::input::Event;
 
 pub struct Context<'a> {
     pub editor: &'a mut Editor,

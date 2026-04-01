@@ -19,7 +19,7 @@ use helix_stdx::{
     path,
     rope::{self, RopeSliceExt},
 };
-use helix_view::{
+use crate::view::{
     align_view,
     document::{from_reader, SCRATCH_BUFFER_NAME},
     Align, Document, AppId, Editor,

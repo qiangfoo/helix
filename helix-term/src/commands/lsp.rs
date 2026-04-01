@@ -14,7 +14,7 @@ use helix_core::{
     text_annotations::InlineAnnotation, Selection, Uri,
 };
 use helix_stdx::path;
-use helix_view::{
+use crate::view::{
     document::{DocumentInlayHints, DocumentInlayHintsId},
     editor::Action,
     handlers::lsp::SignatureHelpInvoked,

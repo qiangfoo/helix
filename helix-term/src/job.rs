@@ -1,6 +1,6 @@
 use helix_event::status::StatusMessage;
 use helix_event::{runtime_local, send_blocking};
-use helix_view::Editor;
+use crate::view::Editor;
 use once_cell::sync::OnceCell;
 
 use futures_util::future::{BoxFuture, Future, FutureExt};

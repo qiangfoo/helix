@@ -19,7 +19,7 @@ use helix_core::{
     text_annotations::TextAnnotations,
     visual_offset_from_block, Position, Range, Selection,
 };
-use helix_view::{
+use crate::view::{
     annotations::diagnostics::DiagnosticFilter,
     document::{Mode, SCRATCH_BUFFER_NAME},
     editor::CursorShapeConfig,

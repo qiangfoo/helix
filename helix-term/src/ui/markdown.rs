@@ -13,7 +13,7 @@ use helix_core::{
     syntax::{self, HighlightEvent, OverlayHighlights},
     RopeSlice, Syntax,
 };
-use helix_view::{
+use crate::view::{
     graphics::{Margin, Rect, Style},
     theme::Modifier,
     Theme,

@@ -44,7 +44,7 @@ use helix_core::{
     char_idx_at_visual_offset, fuzzy::MATCHER, movement::Direction,
     text_annotations::TextAnnotations, unicode::segmentation::UnicodeSegmentation, Position,
 };
-use helix_view::{
+use crate::view::{
     editor::Action,
     graphics::{CursorKind, Margin, Modifier, Rect, RectExt},
     view::ViewPosition,

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use helix_term::application::Application;
-use helix_view::input::parse_macro;
+use helix_term::view::input::parse_macro;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crossterm::event::{Event, KeyEvent};

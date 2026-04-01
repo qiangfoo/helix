@@ -11,7 +11,7 @@ use crossterm::{
     execute, queue,
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use helix_view::graphics::{CursorKind, Rect};
+use crate::view::graphics::{CursorKind, Rect};
 use once_cell::sync::OnceCell;
 use ratatui::buffer::Buffer;
 use std::io::{self, Stdout, Write};
@@ -24,8 +24,8 @@ pub struct Config {
     pub force_enable_extended_underlines: bool,
 }
 
-impl From<&helix_view::editor::Config> for Config {
-    fn from(config: &helix_view::editor::Config) -> Self {
+impl From<&crate::view::editor::Config> for Config {
+    fn from(config: &crate::view::editor::Config) -> Self {
         Self {
             enable_mouse_capture: config.mouse,
             force_enable_extended_underlines: config.undercurl,
@@ -208,12 +208,12 @@ impl HelixTerminal {
     }
 
     /// Get theme mode (dark/light). Not available with crossterm backend.
-    pub fn get_theme_mode(&self) -> Option<helix_view::theme::Mode> {
+    pub fn get_theme_mode(&self) -> Option<crate::view::theme::Mode> {
         None
     }
 
     /// Set the terminal background color via crossterm.
-    pub fn set_background_color(&mut self, color: Option<helix_view::graphics::Color>) -> io::Result<()> {
+    pub fn set_background_color(&mut self, color: Option<crate::view::graphics::Color>) -> io::Result<()> {
         use crossterm::style::{SetBackgroundColor, Color as CColor};
         if let Some(color) = color {
             let rcolor: ratatui::style::Color = color.into();
@@ -315,11 +315,11 @@ impl TestTerminal {
         true
     }
 
-    pub fn get_theme_mode(&self) -> Option<helix_view::theme::Mode> {
+    pub fn get_theme_mode(&self) -> Option<crate::view::theme::Mode> {
         None
     }
 
-    pub fn set_background_color(&mut self, _color: Option<helix_view::graphics::Color>) -> io::Result<()> {
+    pub fn set_background_color(&mut self, _color: Option<crate::view::graphics::Color>) -> io::Result<()> {
         Ok(())
     }
 

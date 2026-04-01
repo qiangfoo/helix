@@ -1,6 +1,6 @@
 use helix_event::{events, register_event};
-use helix_view::document::Mode;
-use helix_view::events::{
+use crate::view::document::Mode;
+use crate::view::events::{
     ConfigDidChange, DiagnosticsDidChange, DocumentDidChange, DocumentDidClose, DocumentDidOpen,
     DocumentFocusLost, LanguageServerExited, LanguageServerInitialized, SelectionDidChange,
 };

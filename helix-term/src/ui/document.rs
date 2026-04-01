@@ -7,11 +7,11 @@ use helix_core::syntax::{self, HighlightEvent, Highlighter, OverlayHighlights};
 use helix_core::text_annotations::TextAnnotations;
 use helix_core::{visual_offset_from_block, Position, RopeSlice};
 use helix_stdx::rope::RopeSliceExt;
-use helix_view::editor::{WhitespaceConfig, WhitespaceRenderValue};
-use helix_view::graphics::{Rect, RectExt};
-use helix_view::theme::Style;
-use helix_view::view::ViewPosition;
-use helix_view::{Document, Theme};
+use crate::view::editor::{WhitespaceConfig, WhitespaceRenderValue};
+use crate::view::graphics::{Rect, RectExt};
+use crate::view::theme::Style;
+use crate::view::view::ViewPosition;
+use crate::view::{Document, Theme};
 use ratatui::buffer::Buffer as Surface;
 
 use crate::buffer_ext::BufferExt;

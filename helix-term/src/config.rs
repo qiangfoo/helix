@@ -1,7 +1,7 @@
 use crate::keymap;
 use crate::keymap::{merge_keys, KeyTrie};
 use helix_loader::merge_toml_values;
-use helix_view::{document::Mode, theme};
+use crate::view::{document::Mode, theme};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -13,7 +13,7 @@ use toml::de::Error as TomlError;
 pub struct Config {
     pub theme: Option<theme::Config>,
     pub keys: HashMap<Mode, KeyTrie>,
-    pub editor: helix_view::editor::Config,
+    pub editor: crate::view::editor::Config,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -29,7 +29,7 @@ impl Default for Config {
         Config {
             theme: None,
             keys: keymap::default(),
-            editor: helix_view::editor::Config::default(),
+            editor: crate::view::editor::Config::default(),
         }
     }
 }
@@ -75,7 +75,7 @@ impl Config {
                 }
 
                 let editor = match (global.editor, local.editor) {
-                    (None, None) => helix_view::editor::Config::default(),
+                    (None, None) => crate::view::editor::Config::default(),
                     (None, Some(val)) | (Some(val), None) => {
                         val.try_into().map_err(ConfigLoadError::BadConfig)?
                     }
@@ -104,7 +104,7 @@ impl Config {
                     theme: config.theme,
                     keys,
                     editor: config.editor.map_or_else(
-                        || Ok(helix_view::editor::Config::default()),
+                        || Ok(crate::view::editor::Config::default()),
                         |val| val.try_into().map_err(ConfigLoadError::BadConfig),
                     )?,
                 }
@@ -140,7 +140,7 @@ mod tests {
     fn parsing_keymaps_config_file() {
         use crate::keymap;
         use helix_core::hashmap;
-        use helix_view::document::Mode;
+        use crate::view::document::Mode;
 
         let sample_keymaps = r#"
             [keys.insert]

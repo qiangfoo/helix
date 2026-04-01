@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use helix_core::doc_formatter::FormattedGrapheme;
 use helix_core::Position;
-use helix_view::editor::CursorCache;
+use crate::view::editor::CursorCache;
 
 use crate::ui::document::{LinePos, TextRenderer};
 
@@ -20,7 +20,7 @@ mod diagnostics;
 /// the rendering infrastructure.
 ///
 /// To reserve space for virtual text lines (which is then filled by this trait) emit appropriate
-/// [`LineAnnotation`](helix_core::text_annotations::LineAnnotation)s in [`helix_view::View::text_annotations`]
+/// [`LineAnnotation`](helix_core::text_annotations::LineAnnotation)s in [`crate::view::View::text_annotations`]
 pub trait Decoration {
     /// Called **before** a **visual** line is rendered. A visual line does not
     /// necessarily correspond to a single line in a document as soft wrapping can

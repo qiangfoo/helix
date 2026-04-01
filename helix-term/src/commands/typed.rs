@@ -6,9 +6,9 @@ use super::*;
 use helix_core::command_line::{Args, Flag, Signature, Token, TokenKind};
 use helix_core::fuzzy::fuzzy_match;
 use helix_stdx::path::home_dir;
-use helix_view::document::DEFAULT_LANGUAGE_NAME;
-use helix_view::editor::ConfigEvent;
-use helix_view::expansion;
+use crate::view::document::DEFAULT_LANGUAGE_NAME;
+use crate::view::editor::ConfigEvent;
+use crate::view::expansion;
 use serde_json::Value;
 use ui::completers::{self, Completer};
 
@@ -134,7 +134,7 @@ fn tab_next(
     if event != PromptEvent::Validate {
         return Ok(());
     }
-    let callback = crate::job::Callback::Editor(Box::new(|editor: &mut helix_view::Editor| {
+    let callback = crate::job::Callback::Editor(Box::new(|editor: &mut crate::view::Editor| {
         {
             use crate::ui::EditorApps;
             editor.next_app();
@@ -152,7 +152,7 @@ fn tab_previous(
     if event != PromptEvent::Validate {
         return Ok(());
     }
-    let callback = crate::job::Callback::Editor(Box::new(|editor: &mut helix_view::Editor| {
+    let callback = crate::job::Callback::Editor(Box::new(|editor: &mut crate::view::Editor| {
         {
             use crate::ui::EditorApps;
             editor.prev_app();
@@ -171,7 +171,7 @@ fn tab_close(
         return Ok(());
     }
     crate::session::save_session(cx.editor);
-    let callback = crate::job::Callback::Editor(Box::new(|editor: &mut helix_view::Editor| {
+    let callback = crate::job::Callback::Editor(Box::new(|editor: &mut crate::view::Editor| {
         {
             use crate::ui::EditorApps;
             editor.close_active_app();

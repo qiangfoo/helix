@@ -1,7 +1,7 @@
 use helix_core::syntax::config::LanguageServerFeature;
 use helix_event::{cancelable_future, register_hook};
 use helix_lsp::{lsp, util::lsp_range_to_range, OffsetEncoding};
-use helix_view::{
+use crate::view::{
     events::{
         ConfigDidChange, DocumentDidChange, DocumentDidOpen, LanguageServerExited,
         LanguageServerInitialized, SelectionDidChange,

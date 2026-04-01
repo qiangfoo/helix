@@ -8,7 +8,7 @@ use std::{
 use anyhow::bail;
 use helix_core::{test, Selection, Transaction};
 use helix_term::{application::Application, args::Args, config::Config, keymap::merge_keys};
-use helix_view::{current_ref, doc, editor::LspConfig, input::parse_macro};
+use helix_term::{current_ref, doc, view::{editor::LspConfig, input::parse_macro}};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crossterm::event::{Event, KeyEvent};
@@ -180,7 +180,7 @@ pub async fn test_key_sequence_with_input_text<T: Into<TestCase>>(
         None => AppBuilder::new().build()?,
     };
 
-    let (view, doc) = helix_view::current!(app.editor);
+    let (view, doc) = helix_term::current!(app.editor);
     let sel = doc.selection(view.id).clone();
 
     // replace the initial text with the input text
@@ -268,8 +268,8 @@ pub fn test_config() -> Config {
     }
 }
 
-pub fn test_editor_config() -> helix_view::editor::Config {
-    helix_view::editor::Config {
+pub fn test_editor_config() -> helix_term::view::editor::Config {
+    helix_term::view::editor::Config {
         lsp: LspConfig {
             enable: false,
             ..Default::default()
@@ -337,7 +337,7 @@ impl AppBuilder {
         // shows the welcome page and editor.tabs is empty.  Tests that use
         // current!() need at least one tab, so create a scratch document.
         if app.editor.tab_count() == 0 {
-            let doc = helix_view::Document::default(
+            let doc = helix_term::view::Document::default(
                 app.editor.config.clone(),
                 app.editor.syn_loader.clone(),
             );
@@ -348,7 +348,7 @@ impl AppBuilder {
         }
 
         if let Some((text, selection)) = self.input {
-            let (view, doc) = helix_view::current!(app.editor);
+            let (view, doc) = helix_term::current!(app.editor);
             let sel = doc.selection(view.id).clone();
             let trans = Transaction::change_by_selection(doc.text(), &sel, |_| {
                 (0, doc.text().len_chars(), Some((text.clone()).into()))

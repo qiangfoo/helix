@@ -30,7 +30,7 @@ pub use diff_view::DiffView;
 pub use editor::EditorView;
 pub use tab_manager::TabManager;
 use helix_stdx::rope;
-use helix_view::theme::Style;
+use crate::view::theme::Style;
 pub use markdown::Markdown;
 pub use menu::Menu;
 pub use picker::{Column as PickerColumn, FileLocation, Picker};
@@ -40,7 +40,7 @@ pub use select::Select;
 pub use spinner::{ProgressSpinners, Spinner};
 pub use text::Text;
 
-use helix_view::{Document, Editor};
+use crate::view::{Document, Editor};
 use ratatui::text::{Span, Line};
 
 use std::path::Path;
@@ -505,9 +505,9 @@ pub mod completers {
     use helix_core::command_line::{self, Tokenizer};
     use helix_core::fuzzy::fuzzy_match;
     use helix_core::syntax::config::LanguageServerFeature;
-    use helix_view::document::SCRATCH_BUFFER_NAME;
-    use helix_view::theme;
-    use helix_view::{editor::Config, Editor};
+    use crate::view::document::SCRATCH_BUFFER_NAME;
+    use crate::view::theme;
+    use crate::view::{editor::Config, Editor};
     use once_cell::sync::Lazy;
     use std::borrow::Cow;
     use std::collections::BTreeSet;

@@ -1,10 +1,10 @@
 use std::any::Any;
 use std::path::PathBuf;
 
-use helix_view::graphics::{CursorKind, Rect};
-use helix_view::input::KeyEvent;
-use helix_view::keyboard::KeyCode;
-use helix_view::Editor;
+use crate::view::graphics::{CursorKind, Rect};
+use crate::view::input::KeyEvent;
+use crate::view::keyboard::KeyCode;
+use crate::view::Editor;
 use ratatui::buffer::Buffer as Surface;
 
 use crate::compositor::{self, Context, EventResult};
@@ -34,7 +34,7 @@ impl WelcomePage {
                 let root = helix_core::find_workspace().0;
                 if root.exists() {
                     let callback: compositor::Callback = Box::new(
-                        move |editor: &mut helix_view::Editor| {
+                        move |editor: &mut crate::view::Editor| {
                             use crate::layers::EditorLayers;
                             let picker = ui::file_picker(editor, root);
                             editor.push_layer(Box::new(overlaid(picker)));
@@ -51,7 +51,7 @@ impl WelcomePage {
                 ..
             } => {
                 let callback: compositor::Callback = Box::new(
-                    move |editor: &mut helix_view::Editor| {
+                    move |editor: &mut crate::view::Editor| {
                         use crate::layers::EditorLayers;
                         let cwd = helix_stdx::env::current_working_dir();
                         if let Ok(picker) = ui::file_explorer(cwd, editor) {

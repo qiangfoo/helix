@@ -4,8 +4,8 @@
 //! overlays → ActiveAppProxy → TabManager (global keymaps).
 
 use helix_core::Position;
-use helix_view::graphics::{CursorKind, Rect};
-use helix_view::Editor;
+use crate::view::graphics::{CursorKind, Rect};
+use crate::view::Editor;
 use ratatui::buffer::Buffer as Surface;
 
 use crate::compositor::{self, Component, Context, EventResult};

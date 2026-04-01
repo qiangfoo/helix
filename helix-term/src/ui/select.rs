@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use helix_view::{graphics::{Rect, RectExt}, Editor};
+use crate::view::{graphics::{Rect, RectExt}, Editor};
 use crate::buffer_ext::BufferExt;
 use ratatui::{
     buffer::Buffer as Surface,

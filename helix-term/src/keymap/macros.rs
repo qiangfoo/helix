@@ -1,15 +1,15 @@
 #[macro_export]
 macro_rules! key {
     ($key:ident) => {
-        ::helix_view::input::KeyEvent {
-            code: ::helix_view::keyboard::KeyCode::$key,
-            modifiers: ::helix_view::keyboard::KeyModifiers::NONE,
+        $crate::view::input::KeyEvent {
+            code: $crate::view::keyboard::KeyCode::$key,
+            modifiers: $crate::view::keyboard::KeyModifiers::NONE,
         }
     };
     ($($ch:tt)*) => {
-        ::helix_view::input::KeyEvent {
-            code: ::helix_view::keyboard::KeyCode::Char($($ch)*),
-            modifiers: ::helix_view::keyboard::KeyModifiers::NONE,
+        $crate::view::input::KeyEvent {
+            code: $crate::view::keyboard::KeyCode::Char($($ch)*),
+            modifiers: $crate::view::keyboard::KeyModifiers::NONE,
         }
     };
 }
@@ -17,15 +17,15 @@ macro_rules! key {
 #[macro_export]
 macro_rules! shift {
     ($key:ident) => {
-        ::helix_view::input::KeyEvent {
-            code: ::helix_view::keyboard::KeyCode::$key,
-            modifiers: ::helix_view::keyboard::KeyModifiers::SHIFT,
+        $crate::view::input::KeyEvent {
+            code: $crate::view::keyboard::KeyCode::$key,
+            modifiers: $crate::view::keyboard::KeyModifiers::SHIFT,
         }
     };
     ($($ch:tt)*) => {
-        ::helix_view::input::KeyEvent {
-            code: ::helix_view::keyboard::KeyCode::Char($($ch)*),
-            modifiers: ::helix_view::keyboard::KeyModifiers::SHIFT,
+        $crate::view::input::KeyEvent {
+            code: $crate::view::keyboard::KeyCode::Char($($ch)*),
+            modifiers: $crate::view::keyboard::KeyModifiers::SHIFT,
         }
     };
 }
@@ -33,15 +33,15 @@ macro_rules! shift {
 #[macro_export]
 macro_rules! ctrl {
     ($key:ident) => {
-        ::helix_view::input::KeyEvent {
-            code: ::helix_view::keyboard::KeyCode::$key,
-            modifiers: ::helix_view::keyboard::KeyModifiers::CONTROL,
+        $crate::view::input::KeyEvent {
+            code: $crate::view::keyboard::KeyCode::$key,
+            modifiers: $crate::view::keyboard::KeyModifiers::CONTROL,
         }
     };
     ($($ch:tt)*) => {
-        ::helix_view::input::KeyEvent {
-            code: ::helix_view::keyboard::KeyCode::Char($($ch)*),
-            modifiers: ::helix_view::keyboard::KeyModifiers::CONTROL,
+        $crate::view::input::KeyEvent {
+            code: $crate::view::keyboard::KeyCode::Char($($ch)*),
+            modifiers: $crate::view::keyboard::KeyModifiers::CONTROL,
         }
     };
 }
@@ -49,15 +49,15 @@ macro_rules! ctrl {
 #[macro_export]
 macro_rules! alt {
     ($key:ident) => {
-        ::helix_view::input::KeyEvent {
-            code: ::helix_view::keyboard::KeyCode::$key,
-            modifiers: ::helix_view::keyboard::KeyModifiers::ALT,
+        $crate::view::input::KeyEvent {
+            code: $crate::view::keyboard::KeyCode::$key,
+            modifiers: $crate::view::keyboard::KeyModifiers::ALT,
         }
     };
     ($($ch:tt)*) => {
-        ::helix_view::input::KeyEvent {
-            code: ::helix_view::keyboard::KeyCode::Char($($ch)*),
-            modifiers: ::helix_view::keyboard::KeyModifiers::ALT,
+        $crate::view::input::KeyEvent {
+            code: $crate::view::keyboard::KeyCode::Char($($ch)*),
+            modifiers: $crate::view::keyboard::KeyModifiers::ALT,
         }
     };
 }
@@ -103,7 +103,7 @@ macro_rules! keymap {
             let mut _order = ::std::vec::Vec::with_capacity(_cap);
             $(
                 $(
-                    let _key = $key.parse::<::helix_view::input::KeyEvent>().unwrap();
+                    let _key = $key.parse::<$crate::view::input::KeyEvent>().unwrap();
                     let _duplicate = _map.insert(
                         _key,
                         keymap!(@trie $value)

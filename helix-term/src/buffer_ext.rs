@@ -4,7 +4,7 @@
 //! are ported here as an extension trait on ratatui's Buffer.
 
 use helix_core::unicode::width::UnicodeWidthStr;
-use helix_view::graphics::Style;
+use crate::view::graphics::Style;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use std::cmp::min;

@@ -5,12 +5,12 @@ use helix_core::doc_formatter::{DocumentFormatter, FormattedGrapheme};
 use helix_core::graphemes::Grapheme;
 use helix_core::text_annotations::TextAnnotations;
 use helix_core::{Diagnostic, Position};
-use helix_view::annotations::diagnostics::{
+use crate::view::annotations::diagnostics::{
     DiagnosticFilter, InlineDiagnosticAccumulator, InlineDiagnosticsConfig,
 };
 
-use helix_view::theme::Style;
-use helix_view::{Document, Theme};
+use crate::view::theme::Style;
+use crate::view::{Document, Theme};
 
 use crate::ui::document::{LinePos, TextRenderer};
 use crate::ui::text_decorations::Decoration;

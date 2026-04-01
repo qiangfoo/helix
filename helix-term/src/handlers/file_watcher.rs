@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use helix_event::register_hook;
-use helix_view::document::DiffSource;
-use helix_view::events::{DocumentDidClose, DocumentDidOpen};
-use helix_view::handlers::{FileWatcherCommand, Handlers};
+use crate::view::document::DiffSource;
+use crate::view::events::{DocumentDidClose, DocumentDidOpen};
+use crate::view::handlers::{FileWatcherCommand, Handlers};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc::{self, Sender};
 

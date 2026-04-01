@@ -10,14 +10,14 @@ use helix_core::syntax::config::LanguageServerFeature;
 use helix_core::Uri;
 use helix_event::{cancelable_future, register_hook, send_blocking};
 use helix_lsp::{lsp, LanguageServerId};
-use helix_view::document::Mode;
-use helix_view::events::{
+use crate::view::document::Mode;
+use crate::view::events::{
     DiagnosticsDidChange, DocumentDidChange, DocumentDidOpen, LanguageServerInitialized,
 };
-use helix_view::handlers::diagnostics::DiagnosticEvent;
-use helix_view::handlers::lsp::{PullAllDocumentsDiagnosticsEvent, PullDiagnosticsEvent};
-use helix_view::handlers::Handlers;
-use helix_view::{AppId, Editor};
+use crate::view::handlers::diagnostics::DiagnosticEvent;
+use crate::view::handlers::lsp::{PullAllDocumentsDiagnosticsEvent, PullDiagnosticsEvent};
+use crate::view::handlers::Handlers;
+use crate::view::{AppId, Editor};
 
 use crate::events::OnModeSwitch;
 use crate::job;

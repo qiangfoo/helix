@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use helix_core::unicode::width::UnicodeWidthStr;
-use helix_view::{
+use crate::view::{
     document::SCRATCH_BUFFER_NAME,
     graphics::{Color, CursorKind, Rect, RectExt},
     input::{MouseButton, MouseEventKind},
@@ -45,7 +45,7 @@ impl TabManager {
     /// Uses stateless keymaps lookup + pushes KeyMenu on Pending.
     fn global_handle_key_event(
         &self,
-        mut key: helix_view::input::KeyEvent,
+        mut key: crate::view::input::KeyEvent,
         ctx: &mut Context,
     ) -> EventResult {
         crate::ui::editor::canonicalize_key(&mut key);
@@ -150,7 +150,7 @@ impl TabManager {
 
             let style = if is_active {
                 tab_active_style
-                    .underline_style(helix_view::graphics::UnderlineStyle::Reset)
+                    .underline_style(crate::view::graphics::UnderlineStyle::Reset)
                     .underline_color(Color::Reset)
             } else {
                 tab_inactive_style.bg(Color::Reset)
@@ -202,7 +202,7 @@ impl TabManager {
 
             if is_active && viewport.height > 1 {
                 let indicator_style = tab_active_style
-                    .underline_style(helix_view::graphics::UnderlineStyle::Reset)
+                    .underline_style(crate::view::graphics::UnderlineStyle::Reset)
                     .underline_color(Color::Reset);
                 for ix in x_start..x {
                     surface.set_stringn(ix, viewport.y, "▔", 1, indicator_style);
@@ -226,7 +226,7 @@ impl TabManager {
 
         if let Some((status_msg, severity)) = &editor.status_msg {
             status_msg_width = status_msg.width();
-            use helix_view::editor::Severity;
+            use crate::view::editor::Severity;
             let style = if *severity == Severity::Error {
                 editor.theme.get("error")
             } else {
@@ -339,7 +339,7 @@ impl Component for TabManager {
 
         surface.set_style(area, cx.editor.theme.get("ui.background"));
 
-        use helix_view::editor::BufferLine;
+        use crate::view::editor::BufferLine;
         let app_count = cx.editor.app_count();
         let show_tab_bar = match cx.editor.config().bufferline {
             BufferLine::Always => true,

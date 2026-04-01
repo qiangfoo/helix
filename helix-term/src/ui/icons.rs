@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use devicons::{icon_for_file, File, FileIcon, Theme};
-use helix_view::graphics::Color;
+use crate::view::graphics::Color;
 
 /// An icon with its associated foreground color.
 pub struct Icon {

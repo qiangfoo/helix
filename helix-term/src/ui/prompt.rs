@@ -2,10 +2,10 @@ use crate::compositor::{Component, Context, Event, EventResult};
 use crate::{alt, ctrl, key, shift, ui};
 use arc_swap::ArcSwap;
 use helix_core::syntax;
-use helix_view::document::Mode;
-use helix_view::input::KeyEvent;
-use helix_view::keyboard::KeyCode;
-use helix_view::Editor;
+use crate::view::document::Mode;
+use crate::view::input::KeyEvent;
+use crate::view::keyboard::KeyCode;
+use crate::view::Editor;
 use std::sync::Arc;
 use std::{borrow::Cow, ops::RangeFrom};
 use crate::buffer_ext::BufferExt;
@@ -18,7 +18,7 @@ use helix_core::{
     unicode::width::UnicodeWidthStr,
     Position,
 };
-use helix_view::graphics::{CursorKind, Margin, Rect, RectExt};
+use crate::view::graphics::{CursorKind, Margin, Rect, RectExt};
 
 type PromptCharHandler = Box<dyn Fn(&mut Prompt, char, &Context)>;
 
@@ -456,7 +456,7 @@ impl Prompt {
                 let completion_item_style = if is_selected {
                     selected_color
                 } else {
-                    completion_color.patch(helix_view::graphics::Style::from(completion.style))
+                    completion_color.patch(crate::view::graphics::Style::from(completion.style))
                 };
 
                 surface.set_stringn(

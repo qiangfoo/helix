@@ -1,5 +1,5 @@
 use helix_core::Position;
-use helix_view::{
+use crate::view::{
     graphics::{CursorKind, Rect, RectExt},
     Editor,
 };

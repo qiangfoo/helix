@@ -3,8 +3,8 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use helix_core::syntax;
 use helix_lsp::lsp;
-use helix_view::graphics::{Margin, Rect, RectExt, Style};
-use helix_view::input::Event;
+use crate::view::graphics::{Margin, Rect, RectExt, Style};
+use crate::view::input::Event;
 use ratatui::buffer::Buffer;
 use ratatui::widgets::{BorderType, Paragraph, Widget, Wrap};
 

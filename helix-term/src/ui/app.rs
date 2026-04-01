@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use helix_core::Position;
-use helix_view::graphics::{CursorKind, Rect};
-use helix_view::Editor;
+use crate::view::graphics::{CursorKind, Rect};
+use crate::view::Editor;
 use ratatui::buffer::Buffer as Surface;
 
 use crate::compositor::{Context, EventResult};
@@ -13,8 +13,8 @@ use crate::config::Config;
 use crate::keymap::Keymaps;
 use crate::layers::LayerState;
 
-pub use helix_view::input::Event;
-pub use helix_view::AppId;
+pub use crate::view::input::Event;
+pub use crate::view::AppId;
 
 /// Trait for tab applications. Each tab in the tab bar is an Application.
 ///
@@ -97,7 +97,7 @@ pub trait EditorApps {
     fn prev_app(&mut self);
     fn switch_app(&mut self, index: usize);
 
-    fn add_editor_app(&mut self, doc: helix_view::Document);
+    fn add_editor_app(&mut self, doc: crate::view::Document);
     fn add_diff_app(&mut self, diff_view: super::diff_view::DiffView);
     fn make_keymaps(&self) -> Keymaps;
 }
@@ -137,7 +137,7 @@ impl EditorApps for Editor {
 
     fn close_app_at(&mut self, index: usize) {
         use super::diff_view::{DiffKey, DiffView};
-        use helix_view::handlers::FileWatcherCommand;
+        use crate::view::handlers::FileWatcherCommand;
 
         // Extract info we need before mutating, to avoid borrow conflicts
         let (worktree_to_unwatch, editor_tab_index) = {
@@ -271,7 +271,7 @@ impl EditorApps for Editor {
         }
     }
 
-    fn add_editor_app(&mut self, doc: helix_view::Document) {
+    fn add_editor_app(&mut self, doc: crate::view::Document) {
         // If the file is already open in an existing tab, activate it instead.
         if let Some(new_path) = doc.path().and_then(|p| std::fs::canonicalize(p).ok()) {
             for (i, tab) in self.tabs.iter().enumerate() {
@@ -298,7 +298,7 @@ impl EditorApps for Editor {
         }
 
         let keymaps = self.make_keymaps();
-        let dv = helix_view::DocView::new(doc);
+        let dv = crate::view::DocView::new(doc);
         let tab_index = self.add_tab(Box::new(dv));
         let editor_view = Box::new(super::EditorView::new(keymaps, tab_index));
         self.add_app(editor_view);
@@ -307,7 +307,7 @@ impl EditorApps for Editor {
 
     fn add_diff_app(&mut self, diff_view: super::diff_view::DiffView) {
         use super::diff_view::DiffKey;
-        use helix_view::handlers::FileWatcherCommand;
+        use crate::view::handlers::FileWatcherCommand;
 
         // Register worktree watch for LocalChanges diffs
         if matches!(diff_view.diff_key(), DiffKey::LocalChanges) {

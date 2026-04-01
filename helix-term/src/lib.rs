@@ -1,5 +1,5 @@
 #[macro_use]
-extern crate helix_view;
+pub mod view;
 
 pub mod application;
 pub mod args;

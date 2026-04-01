@@ -1,7 +1,7 @@
 use crate::compositor::{Component, Context};
 use ratatui::buffer::Buffer as Surface;
 
-use helix_view::graphics::Rect;
+use crate::view::graphics::Rect;
 
 pub struct Text {
     pub(crate) contents: ratatui::text::Text<'static>,

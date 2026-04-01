@@ -9,7 +9,7 @@ use crate::events;
 use crate::handlers::diagnostics::PullDiagnosticsHandler;
 use crate::handlers::signature_help::SignatureHelpHandler;
 
-pub use helix_view::handlers::Handlers;
+pub use crate::view::handlers::Handlers;
 
 use self::document_colors::DocumentColorsHandler;
 use self::document_links::DocumentLinksHandler;
@@ -40,7 +40,7 @@ pub fn setup(_config: Arc<ArcSwap<Config>>) -> Handlers {
         file_watcher,
     };
 
-    helix_view::handlers::register_hooks(&handlers);
+    crate::view::handlers::register_hooks(&handlers);
     signature_help::register_hooks(&handlers);
     document_highlight::register_hooks(&handlers);
     diagnostics::register_hooks(&handlers);

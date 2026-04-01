@@ -3,7 +3,7 @@ pub mod macros;
 
 pub use crate::commands::MappableCommand;
 use arc_swap::{access::{DynAccess, DynGuard}, ArcSwap};
-use helix_view::{document::Mode, info::Info, input::KeyEvent};
+use crate::view::{document::Mode, info::Info, input::KeyEvent};
 use serde::Deserialize;
 use std::{
     collections::{BTreeSet, HashMap},
@@ -514,7 +514,7 @@ mod tests {
     #[test]
     fn escaped_keymap() {
         use crate::commands::MappableCommand;
-        use helix_view::input::{KeyCode, KeyEvent, KeyModifiers};
+        use crate::view::input::{KeyCode, KeyEvent, KeyModifiers};
 
         let keys = r#"
 "+" = [

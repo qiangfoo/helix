@@ -3,7 +3,7 @@ use std::{collections::HashSet, time::Duration};
 use futures_util::{stream::FuturesOrdered, StreamExt};
 use helix_core::{syntax::config::LanguageServerFeature, Assoc};
 use helix_event::{cancelable_future, register_hook};
-use helix_view::{
+use crate::view::{
     document::DocumentLink,
     events::{DocumentDidChange, DocumentDidOpen, LanguageServerExited, LanguageServerInitialized},
     handlers::{lsp::DocumentLinksEvent, Handlers},

@@ -1,0 +1,1763 @@
+use anyhow::{anyhow, bail, Error};
+use arc_swap::access::DynAccess;
+use arc_swap::ArcSwap;
+use helix_core::chars::char_is_word;
+use helix_core::diagnostic::DiagnosticProvider;
+use helix_core::doc_formatter::TextFormat;
+use helix_core::encoding::Encoding;
+use helix_core::syntax::config::LanguageServerFeature;
+use helix_core::text_annotations::{InlineAnnotation, Overlay};
+use helix_event::TaskController;
+use helix_lsp::util::lsp_pos_to_pos;
+use helix_vcs::{DiffHandle, DiffProviderRegistry};
+use once_cell::sync::OnceCell;
+use thiserror;
+
+use serde::de::{self, Deserialize, Deserializer};
+use serde::Serialize;
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::fmt::Display;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::SystemTime;
+
+use helix_core::{
+    editor_config::EditorConfig,
+    encoding,
+    history::History,
+    indent::{auto_detect_indent_style, IndentStyle},
+    line_ending::auto_detect_line_ending,
+    syntax::{self, config::LanguageConfiguration},
+    Diagnostic, LineEnding, Range, Rope, RopeBuilder, Selection, Syntax, Transaction,
+};
+
+use crate::view::{
+    editor::Config,
+    events::{DocumentDidChange, SelectionDidChange},
+    view::ViewPosition,
+    AppId, editor::EditorState, Theme, View, ViewId,
+};
+
+/// 8kB of buffer space for encoding and decoding `Rope`s.
+const BUF_SIZE: usize = 8192;
+
+const DEFAULT_INDENT: IndentStyle = IndentStyle::Tabs;
+const DEFAULT_TAB_WIDTH: usize = 4;
+
+pub const DEFAULT_LANGUAGE_NAME: &str = "text";
+
+pub const SCRATCH_BUFFER_NAME: &str = "[scratch]";
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum Mode {
+    Normal = 0,
+    Select = 1,
+}
+
+impl Display for Mode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Mode::Normal => f.write_str("normal"),
+            Mode::Select => f.write_str("select"),
+        }
+    }
+}
+
+impl FromStr for Mode {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "normal" => Ok(Mode::Normal),
+            "select" => Ok(Mode::Select),
+            _ => bail!("Invalid mode '{}'", s),
+        }
+    }
+}
+
+// toml deserializer doesn't seem to recognize string as enum
+impl<'de> Deserialize<'de> for Mode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(de::Error::custom)
+    }
+}
+
+impl Serialize for Mode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.collect_str(self)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DocumentOpenError {
+    #[error("path must be a regular file, symlink, or directory")]
+    IrregularFile,
+    #[error(transparent)]
+    IoError(#[from] io::Error),
+}
+
+/// Describes how a virtual diff buffer was created, so it can be regenerated.
+#[derive(Debug, Clone)]
+pub enum DiffSource {
+    /// Working directory diff vs HEAD.
+    LocalChanges { cwd: PathBuf },
+    /// A specific commit's diff vs its parent.
+    CommitDiff { cwd: PathBuf, hash: String },
+}
+
+pub struct Document {
+    pub(crate) id: AppId,
+    text: Rope,
+    selections: HashMap<ViewId, Selection>,
+    view_data: HashMap<ViewId, ViewData>,
+    /// Inlay hints annotations for the document, by view.
+    ///
+    /// To know if they're up-to-date, check the `id` field in `DocumentInlayHints`.
+    pub(crate) inlay_hints: HashMap<ViewId, DocumentInlayHints>,
+    /// Jump label overlays for each view.
+    pub(crate) jump_labels: HashMap<ViewId, Vec<Overlay>>,
+    /// LSP document highlights for each view, stored as char ranges.
+    pub(crate) document_highlights: HashMap<ViewId, DocumentHighlights>,
+    /// Set to `true` when the document is updated, reset to `false` on the next inlay hints
+    /// update from the LSP
+    pub inlay_hints_oudated: bool,
+
+    path: Option<PathBuf>,
+    relative_path: OnceCell<Option<PathBuf>>,
+    encoding: &'static encoding::Encoding,
+
+    pub restore_cursor: bool,
+
+    /// Current indent style.
+    pub indent_style: IndentStyle,
+    editor_config: EditorConfig,
+
+    /// The document's default line ending.
+    pub line_ending: LineEnding,
+
+    pub syntax: Option<Syntax>,
+    /// Corresponding language scope name. Usually `source.<lang>`.
+    pub language: Option<Arc<LanguageConfiguration>>,
+
+    /// Linear history of transactions for view synchronization.
+    pub history: History,
+    pub config: Arc<dyn DynAccess<Config> + Send + Sync>,
+
+    // Last time we wrote to the file. This will carry the time the file was last opened if there
+    // were no saves.
+    last_saved_time: SystemTime,
+
+    version: i32, // should be usize?
+    pub(crate) modified_since_accessed: bool,
+
+    pub(crate) diagnostics: Vec<Diagnostic>,
+    pub(crate) language_servers: HashMap<LanguageServerName, Arc<Client>>,
+
+    diff_handle: Option<DiffHandle>,
+    version_control_head: Option<Arc<ArcSwap<Box<str>>>>,
+    worktree_name: Option<String>,
+
+    /// If this document is a git diff buffer, stores how to regenerate it.
+    pub diff_source: Option<DiffSource>,
+
+    // when document was used for most-recent-used buffer picker
+    pub focused_at: std::time::Instant,
+
+    pub readonly: bool,
+
+    pub previous_diagnostic_id: Option<String>,
+
+    /// Annotations for LSP document color swatches
+    pub color_swatches: Option<DocumentColorSwatches>,
+    /// Cached LSP document links for navigation (e.g. goto_file).
+    pub document_links: Vec<DocumentLink>,
+    // NOTE: ideally this would live on the handler for color swatches. This is blocked on a
+    // large refactor that would make `&mut Editor` available on the `DocumentDidChange` event.
+    pub color_swatch_controller: TaskController,
+    /// Per-view task controllers for canceling in-flight document highlight requests.
+    pub document_highlight_controllers: HashMap<ViewId, TaskController>,
+    pub pull_diagnostic_controller: TaskController,
+    pub document_link_controller: TaskController,
+
+    // NOTE: this field should eventually go away - we should use the Editor's syn_loader instead
+    // of storing a copy on every doc. Then we can remove the surrounding `Arc` and use the
+    // `ArcSwap` directly.
+    syn_loader: Arc<ArcSwap<syntax::Loader>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DocumentColorSwatches {
+    pub color_swatches: Vec<InlineAnnotation>,
+    pub colors: Vec<syntax::Highlight>,
+    pub color_swatches_padding: Vec<InlineAnnotation>,
+}
+
+/// Highlight ranges returned by LSP `textDocument/documentHighlight` for a view.
+#[derive(Debug, Clone, Default)]
+pub struct DocumentHighlights {
+    pub ranges: Vec<std::ops::Range<usize>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DocumentLink {
+    /// Character offsets in the document for the link range.
+    pub start: usize,
+    pub end: usize,
+    pub link: lsp::DocumentLink,
+    pub language_server_id: LanguageServerId,
+}
+
+/// Inlay hints for a single `(Document, View)` combo.
+///
+/// There are `*_inlay_hints` field for each kind of hints an LSP can send since we offer the
+/// option to style theme differently in the theme according to the (currently supported) kinds
+/// (`type`, `parameter` and the rest).
+///
+/// Inlay hints are always `InlineAnnotation`s, not overlays or line-ones: LSP may choose to place
+/// them anywhere in the text and will sometime offer config options to move them where the user
+/// wants them but it shouldn't be Helix who decides that so we use the most precise positioning.
+///
+/// The padding for inlay hints needs to be stored separately for before and after (the LSP spec
+/// uses 'left' and 'right' but not all text is left to right so let's be correct) padding because
+/// the 'before' padding must be added to a layer *before* the regular inlay hints and the 'after'
+/// padding comes ... after.
+#[derive(Debug, Clone)]
+pub struct DocumentInlayHints {
+    /// Identifier for the inlay hints stored in this structure. To be checked to know if they have
+    /// to be recomputed on idle or not.
+    pub id: DocumentInlayHintsId,
+
+    /// Inlay hints of `TYPE` kind, if any.
+    pub type_inlay_hints: Vec<InlineAnnotation>,
+
+    /// Inlay hints of `PARAMETER` kind, if any.
+    pub parameter_inlay_hints: Vec<InlineAnnotation>,
+
+    /// Inlay hints that are neither `TYPE` nor `PARAMETER`.
+    ///
+    /// LSPs are not required to associate a kind to their inlay hints, for example Rust-Analyzer
+    /// currently never does (February 2023) and the LSP spec may add new kinds in the future that
+    /// we want to display even if we don't have some special highlighting for them.
+    pub other_inlay_hints: Vec<InlineAnnotation>,
+
+    /// Inlay hint padding. When creating the final `TextAnnotations`, the `before` padding must be
+    /// added first, then the regular inlay hints, then the `after` padding.
+    pub padding_before_inlay_hints: Vec<InlineAnnotation>,
+    pub padding_after_inlay_hints: Vec<InlineAnnotation>,
+}
+
+impl DocumentInlayHints {
+    /// Generate an empty list of inlay hints with the given ID.
+    pub fn empty_with_id(id: DocumentInlayHintsId) -> Self {
+        Self {
+            id,
+            type_inlay_hints: Vec::new(),
+            parameter_inlay_hints: Vec::new(),
+            other_inlay_hints: Vec::new(),
+            padding_before_inlay_hints: Vec::new(),
+            padding_after_inlay_hints: Vec::new(),
+        }
+    }
+}
+
+/// Associated with a [`Document`] and [`ViewId`], uniquely identifies the state of inlay hints for
+/// for that document and view: if this changed since the last save, the inlay hints for the view
+/// should be recomputed.
+///
+/// We can't store the `ViewOffset` instead of the first and last asked-for lines because if
+/// softwrapping changes, the `ViewOffset` may not change while the displayed lines will.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct DocumentInlayHintsId {
+    /// First line for which the inlay hints were requested.
+    pub first_line: usize,
+    /// Last line for which the inlay hints were requested.
+    pub last_line: usize,
+}
+
+use std::fmt;
+impl fmt::Debug for Document {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Document")
+            .field("id", &self.id)
+            .field("text", &self.text)
+            .field("selections", &self.selections)
+            .field("inlay_hints_oudated", &self.inlay_hints_oudated)
+            .field("text_annotations", &self.inlay_hints)
+            .field("view_data", &self.view_data)
+            .field("path", &self.path)
+            .field("encoding", &self.encoding)
+            .field("restore_cursor", &self.restore_cursor)
+            .field("syntax", &self.syntax)
+            .field("language", &self.language)
+            .field("last_saved_time", &self.last_saved_time)
+            .field("version", &self.version)
+            .field("modified_since_accessed", &self.modified_since_accessed)
+            .field("diagnostics", &self.diagnostics)
+            // .field("language_server", &self.language_server)
+            .finish()
+    }
+}
+
+impl fmt::Debug for DocumentInlayHintsId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Much more agreable to read when debugging
+        f.debug_struct("DocumentInlayHintsId")
+            .field("lines", &(self.first_line..self.last_line))
+            .finish()
+    }
+}
+
+impl EditorState {
+    pub(crate) fn clear_doc_relative_paths(&mut self) {
+        self.tabs[self.active_tab].doc_mut().relative_path.take();
+    }
+}
+
+/// Decodes a stream of bytes into UTF-8, returning a `Rope` and the
+/// encoding it was decoded as with BOM information. The optional `encoding`
+/// parameter can be used to override encoding auto-detection.
+pub fn from_reader<R: std::io::Read + ?Sized>(
+    reader: &mut R,
+    encoding: Option<&'static Encoding>,
+) -> Result<(Rope, &'static Encoding, bool), io::Error> {
+    // These two buffers are 8192 bytes in size each and are used as
+    // intermediaries during the decoding process. Text read into `buf`
+    // from `reader` is decoded into `buf_out` as UTF-8. Once either
+    // `buf_out` is full or the end of the reader was reached, the
+    // contents are appended to `builder`.
+    let mut buf = [0u8; BUF_SIZE];
+    let mut buf_out = [0u8; BUF_SIZE];
+    let mut builder = RopeBuilder::new();
+
+    let (encoding, has_bom, mut decoder, read) =
+        read_and_detect_encoding(reader, encoding, &mut buf)?;
+
+    let mut slice = &buf[..read];
+    let mut is_empty = read == 0;
+
+    // `RopeBuilder::append()` expects a `&str`, so this is the "real"
+    // output buffer. When decoding, the number of bytes in the output
+    // buffer will often exceed the number of bytes in the input buffer.
+    // The `result` returned by `decode_to_str()` will state whether or
+    // not that happened. The contents of `buf_str` is appended to
+    // `builder` and it is reused for the next iteration of the decoding
+    // loop.
+    //
+    // As it is possible to read less than the buffer's maximum from `read()`
+    // even when the end of the reader has yet to be reached, the end of
+    // the reader is determined only when a `read()` call returns `0`.
+    //
+    // SAFETY: `buf_out` is a zero-initialized array, thus it will always
+    // contain valid UTF-8.
+    let buf_str = unsafe { std::str::from_utf8_unchecked_mut(&mut buf_out[..]) };
+    let mut total_written = 0usize;
+    loop {
+        let mut total_read = 0usize;
+
+        // An inner loop is necessary as it is possible that the input buffer
+        // may not be completely decoded on the first `decode_to_str()` call
+        // which would happen in cases where the output buffer is filled to
+        // capacity.
+        loop {
+            let (result, read, written, ..) = decoder.decode_to_str(
+                &slice[total_read..],
+                &mut buf_str[total_written..],
+                is_empty,
+            );
+
+            // These variables act as the read and write cursors of `buf` and `buf_str` respectively.
+            // They are necessary in case the output buffer fills before decoding of the entire input
+            // loop is complete. Otherwise, the loop would endlessly iterate over the same `buf` and
+            // the data inside the output buffer would be overwritten.
+            total_read += read;
+            total_written += written;
+            match result {
+                encoding::CoderResult::InputEmpty => {
+                    debug_assert_eq!(slice.len(), total_read);
+                    break;
+                }
+                encoding::CoderResult::OutputFull => {
+                    debug_assert!(slice.len() > total_read);
+                    builder.append(&buf_str[..total_written]);
+                    total_written = 0;
+                }
+            }
+        }
+        // Once the end of the stream is reached, the output buffer is
+        // flushed and the loop terminates.
+        if is_empty {
+            debug_assert_eq!(reader.read(&mut buf)?, 0);
+            builder.append(&buf_str[..total_written]);
+            break;
+        }
+
+        // Once the previous input has been processed and decoded, the next set of
+        // data is fetched from the reader. The end of the reader is determined to
+        // be when exactly `0` bytes were read from the reader, as per the invariants
+        // of the `Read` trait.
+        let read = reader.read(&mut buf)?;
+        slice = &buf[..read];
+        is_empty = read == 0;
+    }
+    let rope = builder.finish();
+    Ok((rope, encoding, has_bom))
+}
+
+pub fn read_to_string<R: std::io::Read + ?Sized>(
+    reader: &mut R,
+    encoding: Option<&'static Encoding>,
+) -> Result<(String, &'static Encoding, bool), Error> {
+    let mut buf = [0u8; BUF_SIZE];
+
+    let (encoding, has_bom, mut decoder, read) =
+        read_and_detect_encoding(reader, encoding, &mut buf)?;
+
+    let mut slice = &buf[..read];
+    let mut is_empty = read == 0;
+    let mut buf_string = String::with_capacity(buf.len());
+
+    loop {
+        let mut total_read = 0usize;
+
+        loop {
+            let (result, read, ..) =
+                decoder.decode_to_string(&slice[total_read..], &mut buf_string, is_empty);
+
+            total_read += read;
+
+            match result {
+                encoding::CoderResult::InputEmpty => {
+                    debug_assert_eq!(slice.len(), total_read);
+                    break;
+                }
+                encoding::CoderResult::OutputFull => {
+                    debug_assert!(slice.len() > total_read);
+                    buf_string.reserve(buf.len())
+                }
+            }
+        }
+
+        if is_empty {
+            debug_assert_eq!(reader.read(&mut buf)?, 0);
+            break;
+        }
+
+        let read = reader.read(&mut buf)?;
+        slice = &buf[..read];
+        is_empty = read == 0;
+    }
+    Ok((buf_string, encoding, has_bom))
+}
+
+/// Reads the first chunk from a Reader into the given buffer
+/// and detects the encoding.
+///
+/// By default, the encoding of the text is auto-detected by
+/// `encoding_rs` for_bom, and if it fails, from `chardetng`
+/// crate which requires sample data from the reader.
+/// As a manual override to this auto-detection is possible, the
+/// same data is read into `buf` to ensure symmetry in the upcoming
+/// loop.
+fn read_and_detect_encoding<R: std::io::Read + ?Sized>(
+    reader: &mut R,
+    encoding: Option<&'static Encoding>,
+    buf: &mut [u8],
+) -> Result<(&'static Encoding, bool, encoding::Decoder, usize), io::Error> {
+    let read = reader.read(buf)?;
+    let is_empty = read == 0;
+    let (encoding, has_bom) = encoding
+        .map(|encoding| (encoding, false))
+        .or_else(|| encoding::Encoding::for_bom(buf).map(|(encoding, _bom_size)| (encoding, true)))
+        .unwrap_or_else(|| {
+            let mut encoding_detector = chardetng::EncodingDetector::new();
+            encoding_detector.feed(buf, is_empty);
+            (encoding_detector.guess(None, true), false)
+        });
+    let decoder = encoding.new_decoder();
+
+    Ok((encoding, has_bom, decoder, read))
+}
+
+use helix_lsp::{lsp, Client, LanguageServerId, LanguageServerName};
+use url::Url;
+
+impl Document {
+    pub fn from(
+        text: Rope,
+        encoding: Option<&'static Encoding>,
+        config: Arc<dyn DynAccess<Config> + Send + Sync>,
+        syn_loader: Arc<ArcSwap<syntax::Loader>>,
+    ) -> Self {
+        let encoding = encoding.unwrap_or(encoding::UTF_8);
+        let line_ending = config.load().default_line_ending.into();
+
+        Self {
+            id: AppId::default(),
+            path: None,
+            relative_path: OnceCell::new(),
+            encoding,
+            text,
+            selections: HashMap::default(),
+            inlay_hints: HashMap::default(),
+            inlay_hints_oudated: false,
+            view_data: Default::default(),
+            indent_style: DEFAULT_INDENT,
+            editor_config: EditorConfig::default(),
+            line_ending,
+            restore_cursor: false,
+            syntax: None,
+            language: None,
+            diagnostics: Vec::new(),
+            version: 0,
+            history: History::default(),
+            last_saved_time: SystemTime::now(),
+            modified_since_accessed: false,
+            language_servers: HashMap::new(),
+            diff_handle: None,
+            config,
+            version_control_head: None,
+            worktree_name: None,
+            diff_source: None,
+            focused_at: std::time::Instant::now(),
+            readonly: true,
+            jump_labels: HashMap::new(),
+            document_highlights: HashMap::new(),
+            color_swatches: None,
+            document_links: Vec::new(),
+            color_swatch_controller: TaskController::new(),
+            document_highlight_controllers: HashMap::new(),
+            syn_loader,
+            previous_diagnostic_id: None,
+            pull_diagnostic_controller: TaskController::new(),
+            document_link_controller: TaskController::new(),
+        }
+    }
+
+    pub fn default(
+        config: Arc<dyn DynAccess<Config> + Send + Sync>,
+        syn_loader: Arc<ArcSwap<syntax::Loader>>,
+    ) -> Self {
+        let line_ending: LineEnding = config.load().default_line_ending.into();
+        let text = Rope::from(line_ending.as_str());
+        Self::from(text, None, config, syn_loader)
+    }
+
+    // TODO: async fn?
+    /// Create a new document from `path`. Encoding is auto-detected, but it can be manually
+    /// overwritten with the `encoding` parameter.
+    pub fn open(
+        path: &Path,
+        mut encoding: Option<&'static Encoding>,
+        detect_language: bool,
+        config: Arc<dyn DynAccess<Config> + Send + Sync>,
+        syn_loader: Arc<ArcSwap<syntax::Loader>>,
+    ) -> Result<Self, DocumentOpenError> {
+        // If the path is not a regular file (e.g.: /dev/random) it should not be opened.
+        if path.metadata().is_ok_and(|metadata| !metadata.is_file()) {
+            return Err(DocumentOpenError::IrregularFile);
+        }
+
+        let editor_config = if config.load().editor_config {
+            EditorConfig::find(path)
+        } else {
+            EditorConfig::default()
+        };
+        encoding = encoding.or(editor_config.encoding);
+
+        // Open the file if it exists, otherwise assume it is a new file (and thus empty).
+        let (rope, encoding, _has_bom) = if path.exists() {
+            let mut file = std::fs::File::open(path)?;
+            from_reader(&mut file, encoding)?
+        } else {
+            let line_ending = editor_config
+                .line_ending
+                .unwrap_or_else(|| config.load().default_line_ending.into());
+            let encoding = encoding.unwrap_or(encoding::UTF_8);
+            (Rope::from(line_ending.as_str()), encoding, false)
+        };
+
+        let loader = syn_loader.load();
+        let mut doc = Self::from(rope, Some(encoding), config, syn_loader);
+
+        // set the path and try detecting the language
+        doc.set_path(Some(path));
+        if detect_language {
+            doc.detect_language(&loader);
+        }
+
+        doc.editor_config = editor_config;
+        doc.detect_indent_and_line_ending();
+
+        Ok(doc)
+    }
+
+    /// Detect the programming language based on the file type.
+    pub fn detect_language(&mut self, loader: &syntax::Loader) {
+        self.set_language(self.detect_language_config(loader), loader);
+    }
+
+    /// Detect the programming language based on the file type.
+    pub fn detect_language_config(
+        &self,
+        loader: &syntax::Loader,
+    ) -> Option<Arc<syntax::config::LanguageConfiguration>> {
+        let language = loader
+            .language_for_filename(self.path.as_ref()?)
+            .or_else(|| loader.language_for_shebang(self.text().slice(..)))?;
+
+        Some(loader.language(language).config().clone())
+    }
+
+    /// Detect the indentation used in the file, or otherwise defaults to the language indentation
+    /// configured in `languages.toml`, with a fallback to tabs if it isn't specified. Line ending
+    /// is likewise auto-detected, and will remain unchanged if no line endings were detected.
+    pub fn detect_indent_and_line_ending(&mut self) {
+        self.indent_style = if let Some(indent_style) = self.editor_config.indent_style {
+            indent_style
+        } else {
+            auto_detect_indent_style(&self.text).unwrap_or_else(|| {
+                self.language_config()
+                    .and_then(|config| config.indent.as_ref())
+                    .map_or(DEFAULT_INDENT, |config| IndentStyle::from_str(&config.unit))
+            })
+        };
+        if let Some(line_ending) = self
+            .editor_config
+            .line_ending
+            .or_else(|| auto_detect_line_ending(&self.text))
+        {
+            self.line_ending = line_ending;
+        }
+    }
+
+    pub fn detect_editor_config(&mut self) {
+        if self.config.load().editor_config {
+            if let Some(path) = self.path.as_ref() {
+                self.editor_config = EditorConfig::find(path);
+            }
+        }
+    }
+
+    pub fn pickup_last_saved_time(&mut self) {
+        self.last_saved_time = match self.path() {
+            Some(path) => match path.metadata() {
+                Ok(metadata) => match metadata.modified() {
+                    Ok(mtime) => mtime,
+                    Err(err) => {
+                        log::debug!("Could not fetch file system's mtime, falling back to current system time: {}", err);
+                        SystemTime::now()
+                    }
+                },
+                Err(err) => {
+                    log::debug!("Could not fetch file system's mtime, falling back to current system time: {}", err);
+                    SystemTime::now()
+                }
+            },
+            None => SystemTime::now(),
+        };
+    }
+
+    // All documents are read-only in this viewer build
+    pub fn detect_readonly(&mut self) {
+        self.readonly = true;
+    }
+
+    /// Reload the document from its path.
+    pub fn reload(
+        &mut self,
+        view: &mut View,
+        provider_registry: &DiffProviderRegistry,
+    ) -> Result<(), Error> {
+        let encoding = self.encoding;
+        let path = match self.path() {
+            None => return Ok(()),
+            Some(path) => match path.exists() {
+                true => path.to_owned(),
+                false => bail!("can't find file to reload from {:?}", self.display_name()),
+            },
+        };
+
+        // Once we have a valid path we check if its readonly status has changed
+        self.detect_readonly();
+
+        let mut file = std::fs::File::open(&path)?;
+        let (rope, ..) = from_reader(&mut file, Some(encoding))?;
+
+        // Calculate the difference between the buffer and source text, and apply it.
+        // This is not considered a modification of the contents of the file regardless
+        // of the encoding.
+        let transaction = helix_core::diff::compare_ropes(self.text(), &rope);
+        self.apply(&transaction, view.id);
+        view.apply(&transaction, self);
+        self.pickup_last_saved_time();
+        self.detect_indent_and_line_ending();
+
+        match provider_registry.get_diff_base(&path) {
+            Some(diff_base) => self.set_diff_base(diff_base),
+            None => self.diff_handle = None,
+        }
+
+        if let Some((head, worktree)) = provider_registry.get_repo_info(&path) {
+            self.version_control_head = Some(head);
+            self.worktree_name = worktree;
+        } else {
+            self.version_control_head = None;
+            self.worktree_name = None;
+        }
+
+        Ok(())
+    }
+
+    /// Sets the [`Document`]'s encoding with the encoding correspondent to `label`.
+    pub fn set_encoding(&mut self, label: &str) -> Result<(), Error> {
+        let encoding =
+            Encoding::for_label(label.as_bytes()).ok_or_else(|| anyhow!("unknown encoding"))?;
+
+        self.encoding = encoding;
+
+        Ok(())
+    }
+
+    /// Returns the [`Document`]'s current encoding.
+    pub fn encoding(&self) -> &'static Encoding {
+        self.encoding
+    }
+
+    /// sets the document path without sending events to various
+    /// observers (like LSP), in most cases `Editor::set_doc_path`
+    /// should be used instead
+    pub fn set_path(&mut self, path: Option<&Path>) {
+        let path = path.map(helix_stdx::path::canonicalize);
+
+        // `take` to remove any prior relative path that may have existed.
+        // This will get set in `relative_path()`.
+        self.relative_path.take();
+
+        // if parent doesn't exist we still want to open the document
+        // and error out when document is saved
+        self.path = path;
+
+        self.detect_readonly();
+        self.pickup_last_saved_time();
+    }
+
+    /// Set the programming language for the file and load associated data (e.g. highlighting)
+    /// if it exists.
+    pub fn set_language(
+        &mut self,
+        language_config: Option<Arc<syntax::config::LanguageConfiguration>>,
+        loader: &syntax::Loader,
+    ) {
+        self.language = language_config;
+        self.syntax = self.language.as_ref().and_then(|config| {
+            Syntax::new(self.text.slice(..), config.language(), loader)
+                .map_err(|err| {
+                    // `NoRootConfig` means that there was an issue loading the language/syntax
+                    // config for the root language of the document. An error must have already
+                    // been logged by `LanguageData::syntax_config`.
+                    if err != syntax::HighlighterError::NoRootConfig {
+                        log::warn!("Error building syntax for '{}': {err}", self.display_name());
+                    }
+                })
+                .ok()
+        });
+    }
+
+    /// Set the programming language for the file if you know the language but don't have the
+    /// [`syntax::config::LanguageConfiguration`] for it.
+    pub fn set_language_by_language_id(
+        &mut self,
+        language_id: &str,
+        loader: &syntax::Loader,
+    ) -> anyhow::Result<()> {
+        let language = loader
+            .language_for_name(language_id)
+            .ok_or_else(|| anyhow!("invalid language id: {}", language_id))?;
+        let config = loader.language(language).config().clone();
+        self.set_language(Some(config), loader);
+        Ok(())
+    }
+
+    /// Select text within the [`Document`].
+    pub fn set_selection(&mut self, view_id: ViewId, selection: Selection) {
+        // TODO: use a transaction?
+        self.selections
+            .insert(view_id, selection.ensure_invariants(self.text().slice(..)));
+        helix_event::dispatch(SelectionDidChange {
+            doc: self,
+            view: view_id,
+        })
+    }
+
+    /// Find the origin selection of the text in a document, i.e. where
+    /// a single cursor would go if it were on the first grapheme. If
+    /// the text is empty, returns (0, 0).
+    pub fn origin(&self) -> Range {
+        if self.text().len_chars() == 0 {
+            return Range::new(0, 0);
+        }
+
+        Range::new(0, 1).grapheme_aligned(self.text().slice(..))
+    }
+
+    /// Reset the view's selection on this document to the
+    /// [origin](Document::origin) cursor.
+    pub fn reset_selection(&mut self, view_id: ViewId) {
+        let origin = self.origin();
+        self.set_selection(view_id, Selection::single(origin.anchor, origin.head));
+    }
+
+    /// Initializes a new selection and view_data for the given view
+    /// if it does not already have them.
+    pub fn ensure_view_init(&mut self, view_id: ViewId) {
+        if !self.selections.contains_key(&view_id) {
+            self.reset_selection(view_id);
+        }
+
+        self.view_data_mut(view_id);
+    }
+
+    /// Mark document as recent used for MRU sorting
+    pub fn mark_as_focused(&mut self) {
+        self.focused_at = std::time::Instant::now();
+    }
+
+    /// Remove a view's selection and inlay hints from this document.
+    pub fn remove_view(&mut self, view_id: ViewId) {
+        self.selections.remove(&view_id);
+        self.inlay_hints.remove(&view_id);
+        self.jump_labels.remove(&view_id);
+        self.document_highlights.remove(&view_id);
+        self.document_highlight_controllers.remove(&view_id);
+    }
+
+    /// Apply a [`Transaction`] to the [`Document`] to change its text.
+    fn apply_impl(
+        &mut self,
+        transaction: &Transaction,
+        view_id: ViewId,
+        emit_lsp_notification: bool,
+    ) -> bool {
+        use helix_core::Assoc;
+
+        let old_doc = self.text().clone();
+        let changes = transaction.changes();
+        if !changes.apply(&mut self.text) {
+            return false;
+        }
+
+        if changes.is_empty() {
+            if let Some(selection) = transaction.selection() {
+                self.selections.insert(
+                    view_id,
+                    selection.clone().ensure_invariants(self.text.slice(..)),
+                );
+                helix_event::dispatch(SelectionDidChange {
+                    doc: self,
+                    view: view_id,
+                });
+            }
+            return true;
+        }
+
+        self.modified_since_accessed = true;
+        self.version += 1;
+
+        for selection in self.selections.values_mut() {
+            *selection = selection
+                .clone()
+                // Map through changes
+                .map(transaction.changes())
+                // Ensure all selections across all views still adhere to invariants.
+                .ensure_invariants(self.text.slice(..));
+        }
+
+        for view_data in self.view_data.values_mut() {
+            view_data.view_position.anchor = transaction
+                .changes()
+                .map_pos(view_data.view_position.anchor, Assoc::Before);
+        }
+
+        // update tree-sitter syntax tree
+        if let Some(syntax) = &mut self.syntax {
+            let loader = self.syn_loader.load();
+            if let Err(err) = syntax.update(
+                old_doc.slice(..),
+                self.text.slice(..),
+                transaction.changes(),
+                &loader,
+            ) {
+                log::error!("TS parser failed, disabling TS for the current buffer: {err}");
+                self.syntax = None;
+            }
+        }
+
+        // TODO: all of that should likely just be hooks
+        // start computing the diff in parallel
+        if let Some(diff_handle) = &self.diff_handle {
+            diff_handle.update_document(self.text.clone(), false);
+        }
+
+        // map diagnostics over changes too
+        changes.update_positions(self.diagnostics.iter_mut().map(|diagnostic| {
+            let assoc = if diagnostic.starts_at_word {
+                Assoc::BeforeWord
+            } else {
+                Assoc::After
+            };
+            (&mut diagnostic.range.start, assoc)
+        }));
+        changes.update_positions(self.diagnostics.iter_mut().filter_map(|diagnostic| {
+            if diagnostic.zero_width {
+                // for zero width diagnostics treat the diagnostic as a point
+                // rather than a range
+                return None;
+            }
+            let assoc = if diagnostic.ends_at_word {
+                Assoc::AfterWord
+            } else {
+                Assoc::Before
+            };
+            Some((&mut diagnostic.range.end, assoc))
+        }));
+        self.diagnostics.retain_mut(|diagnostic| {
+            if diagnostic.zero_width {
+                diagnostic.range.end = diagnostic.range.start
+            } else if diagnostic.range.start >= diagnostic.range.end {
+                return false;
+            }
+            diagnostic.line = self.text.char_to_line(diagnostic.range.start);
+            true
+        });
+
+        self.diagnostics.sort_by_key(|diagnostic| {
+            (
+                diagnostic.range,
+                diagnostic.severity,
+                diagnostic.provider.clone(),
+            )
+        });
+
+        // Update the inlay hint annotations' positions, helping ensure they are displayed in the proper place
+        let apply_inlay_hint_changes = |annotations: &mut Vec<InlineAnnotation>| {
+            changes.update_positions(
+                annotations
+                    .iter_mut()
+                    .map(|annotation| (&mut annotation.char_idx, Assoc::After)),
+            );
+        };
+
+        self.inlay_hints_oudated = true;
+        for text_annotation in self.inlay_hints.values_mut() {
+            let DocumentInlayHints {
+                id: _,
+                type_inlay_hints,
+                parameter_inlay_hints,
+                other_inlay_hints,
+                padding_before_inlay_hints,
+                padding_after_inlay_hints,
+            } = text_annotation;
+
+            apply_inlay_hint_changes(padding_before_inlay_hints);
+            apply_inlay_hint_changes(type_inlay_hints);
+            apply_inlay_hint_changes(parameter_inlay_hints);
+            apply_inlay_hint_changes(other_inlay_hints);
+            apply_inlay_hint_changes(padding_after_inlay_hints);
+        }
+
+        for highlights in self.document_highlights.values_mut() {
+            let text_len = self.text.len_chars();
+            let mut updated = Vec::with_capacity(highlights.ranges.len());
+            for mut range in highlights.ranges.drain(..) {
+                changes.update_positions(
+                    [
+                        (&mut range.start, Assoc::After),
+                        (&mut range.end, Assoc::After),
+                    ]
+                    .into_iter(),
+                );
+                if range.start >= text_len {
+                    continue;
+                }
+                let end = range.end.min(text_len);
+                if range.start < end {
+                    updated.push(range.start..end);
+                }
+            }
+            highlights.ranges = updated;
+        }
+
+        helix_event::dispatch(DocumentDidChange {
+            doc: self,
+            view: view_id,
+            old_text: &old_doc,
+            changes,
+            ghost_transaction: !emit_lsp_notification,
+        });
+
+        // if specified, the current selection should instead be replaced by transaction.selection
+        if let Some(selection) = transaction.selection() {
+            self.selections.insert(
+                view_id,
+                selection.clone().ensure_invariants(self.text.slice(..)),
+            );
+            helix_event::dispatch(SelectionDidChange {
+                doc: self,
+                view: view_id,
+            });
+        }
+
+        true
+    }
+
+    /// Apply a [`Transaction`] to the [`Document`] to change its text.
+    pub fn apply(&mut self, transaction: &Transaction, view_id: ViewId) -> bool {
+        let success = self.apply_impl(transaction, view_id, true);
+        if success && !transaction.changes().is_empty() {
+            self.history.commit_changeset(transaction.clone());
+        }
+        success
+    }
+
+    pub fn id(&self) -> AppId {
+        self.id
+    }
+
+    /// Get the current revision number
+    pub fn get_current_revision(&self) -> usize {
+        self.history.current_revision()
+    }
+
+    /// Corresponding language scope name. Usually `source.<lang>`.
+    pub fn language_scope(&self) -> Option<&str> {
+        self.language
+            .as_ref()
+            .map(|language| language.scope.as_str())
+    }
+
+    /// Language name for the document. Corresponds to the `name` key in
+    /// `languages.toml` configuration.
+    pub fn language_name(&self) -> Option<&str> {
+        self.language
+            .as_ref()
+            .map(|language| language.language_id.as_str())
+    }
+
+    /// Language ID for the document. Either the `language-id`,
+    /// or the document language name if no `language-id` has been specified.
+    pub fn language_id(&self) -> Option<&str> {
+        self.language_config()?
+            .language_server_language_id
+            .as_deref()
+            .or_else(|| self.language_name())
+    }
+
+    /// Corresponding [`LanguageConfiguration`].
+    pub fn language_config(&self) -> Option<&LanguageConfiguration> {
+        self.language.as_deref()
+    }
+
+    /// Current document version, incremented at each change.
+    pub fn version(&self) -> i32 {
+        self.version
+    }
+
+    /// maintains the order as configured in the language_servers TOML array
+    pub fn language_servers(&self) -> impl Iterator<Item = &helix_lsp::Client> {
+        self.language_config().into_iter().flat_map(move |config| {
+            config.language_servers.iter().filter_map(move |features| {
+                let ls = &**self.language_servers.get(&features.name)?;
+                if ls.is_initialized() {
+                    Some(ls)
+                } else {
+                    None
+                }
+            })
+        })
+    }
+
+    pub fn remove_language_server_by_name(&mut self, name: &str) -> Option<Arc<Client>> {
+        self.language_servers.remove(name)
+    }
+
+    pub fn language_servers_with_feature(
+        &self,
+        feature: LanguageServerFeature,
+    ) -> impl Iterator<Item = &helix_lsp::Client> {
+        self.language_config().into_iter().flat_map(move |config| {
+            config.language_servers.iter().filter_map(move |features| {
+                let ls = &**self.language_servers.get(&features.name)?;
+                if ls.is_initialized()
+                    && ls.supports_feature(feature)
+                    && features.has_feature(feature)
+                {
+                    Some(ls)
+                } else {
+                    None
+                }
+            })
+        })
+    }
+
+    pub fn supports_language_server(&self, id: LanguageServerId) -> bool {
+        self.language_servers().any(|l| l.id() == id)
+    }
+
+    pub fn diff_handle(&self) -> Option<&DiffHandle> {
+        self.diff_handle.as_ref()
+    }
+
+    /// Intialize/updates the differ for this document with a new base.
+    pub fn set_diff_base(&mut self, diff_base: Vec<u8>) {
+        if let Ok((diff_base, ..)) = from_reader(&mut diff_base.as_slice(), Some(self.encoding)) {
+            if let Some(differ) = &self.diff_handle {
+                differ.update_diff_base(diff_base);
+                return;
+            }
+            self.diff_handle = Some(DiffHandle::new(diff_base, self.text.clone()))
+        } else {
+            self.diff_handle = None;
+        }
+    }
+
+    pub fn version_control_head(&self) -> Option<Arc<Box<str>>> {
+        self.version_control_head.as_ref().map(|a| a.load_full())
+    }
+
+    pub fn set_version_control_head(
+        &mut self,
+        version_control_head: Option<Arc<ArcSwap<Box<str>>>>,
+    ) {
+        self.version_control_head = version_control_head;
+    }
+
+    pub fn worktree_name(&self) -> Option<&str> {
+        self.worktree_name.as_deref()
+    }
+
+    pub fn set_worktree_name(&mut self, name: Option<String>) {
+        self.worktree_name = name;
+    }
+
+    #[inline]
+    /// Tree-sitter AST tree
+    pub fn syntax(&self) -> Option<&Syntax> {
+        self.syntax.as_ref()
+    }
+
+    /// The width that the tab character is rendered at
+    pub fn tab_width(&self) -> usize {
+        self.editor_config
+            .tab_width
+            .map(|n| n.get() as usize)
+            .unwrap_or_else(|| {
+                self.language_config()
+                    .and_then(|config| config.indent.as_ref())
+                    .map_or(DEFAULT_TAB_WIDTH, |config| config.tab_width)
+            })
+    }
+
+    // The width (in spaces) of a level of indentation.
+    pub fn indent_width(&self) -> usize {
+        self.indent_style.indent_width(self.tab_width())
+    }
+
+    /// Whether the document should have a trailing line ending appended on save.
+    pub fn insert_final_newline(&self) -> bool {
+        self.editor_config
+            .insert_final_newline
+            .unwrap_or_else(|| self.config.load().insert_final_newline)
+    }
+
+    /// Whether the document should trim whitespace preceding line endings on save.
+    pub fn trim_trailing_whitespace(&self) -> bool {
+        self.editor_config
+            .trim_trailing_whitespace
+            .unwrap_or_else(|| self.config.load().trim_trailing_whitespace)
+    }
+
+    #[inline]
+    /// File path on disk.
+    pub fn path(&self) -> Option<&PathBuf> {
+        self.path.as_ref()
+    }
+
+    /// File path as a URL.
+    pub fn url(&self) -> Option<Url> {
+        Url::from_file_path(self.path()?).ok()
+    }
+
+    pub fn uri(&self) -> Option<helix_core::Uri> {
+        Some(self.path()?.clone().into())
+    }
+
+    #[inline]
+    pub fn text(&self) -> &Rope {
+        &self.text
+    }
+
+    #[inline]
+    pub fn selection(&self, view_id: ViewId) -> &Selection {
+        &self.selections[&view_id]
+    }
+
+    #[inline]
+    pub fn selections(&self) -> &HashMap<ViewId, Selection> {
+        &self.selections
+    }
+
+    fn view_data(&self, view_id: ViewId) -> &ViewData {
+        self.view_data
+            .get(&view_id)
+            .expect("This should only be called after ensure_view_init")
+    }
+
+    fn view_data_mut(&mut self, view_id: ViewId) -> &mut ViewData {
+        self.view_data.entry(view_id).or_default()
+    }
+
+    pub(crate) fn get_view_offset(&self, view_id: ViewId) -> Option<ViewPosition> {
+        Some(self.view_data.get(&view_id)?.view_position)
+    }
+
+    pub fn view_offset(&self, view_id: ViewId) -> ViewPosition {
+        self.view_data(view_id).view_position
+    }
+
+    pub fn set_view_offset(&mut self, view_id: ViewId, new_offset: ViewPosition) {
+        self.view_data_mut(view_id).view_position = new_offset;
+    }
+
+    pub fn relative_path(&self) -> Option<&Path> {
+        self.relative_path
+            .get_or_init(|| {
+                self.path
+                    .as_ref()
+                    .map(|path| helix_stdx::path::get_relative_path(path).to_path_buf())
+            })
+            .as_deref()
+    }
+
+    pub fn display_name(&self) -> Cow<'_, str> {
+        self.relative_path()
+            .map_or_else(|| SCRATCH_BUFFER_NAME.into(), |path| path.to_string_lossy())
+    }
+
+    // transact(Fn) ?
+
+    // -- LSP methods
+
+    #[inline]
+    pub fn identifier(&self) -> lsp::TextDocumentIdentifier {
+        lsp::TextDocumentIdentifier::new(self.url().unwrap())
+    }
+
+    pub fn versioned_identifier(&self) -> lsp::VersionedTextDocumentIdentifier {
+        lsp::VersionedTextDocumentIdentifier::new(self.url().unwrap(), self.version)
+    }
+
+    pub fn position(
+        &self,
+        view_id: ViewId,
+        offset_encoding: helix_lsp::OffsetEncoding,
+    ) -> lsp::Position {
+        let text = self.text();
+
+        helix_lsp::util::pos_to_lsp_pos(
+            text,
+            self.selection(view_id).primary().cursor(text.slice(..)),
+            offset_encoding,
+        )
+    }
+
+    pub fn lsp_diagnostic_to_diagnostic(
+        text: &Rope,
+        language_config: Option<&LanguageConfiguration>,
+        diagnostic: &helix_lsp::lsp::Diagnostic,
+        provider: DiagnosticProvider,
+        offset_encoding: helix_lsp::OffsetEncoding,
+    ) -> Option<Diagnostic> {
+        use helix_core::diagnostic::{Range, Severity::*};
+
+        // TODO: convert inside server
+        let start =
+            if let Some(start) = lsp_pos_to_pos(text, diagnostic.range.start, offset_encoding) {
+                start
+            } else {
+                log::warn!("lsp position out of bounds - {:?}", diagnostic);
+                return None;
+            };
+
+        let end = if let Some(end) = lsp_pos_to_pos(text, diagnostic.range.end, offset_encoding) {
+            end
+        } else {
+            log::warn!("lsp position out of bounds - {:?}", diagnostic);
+            return None;
+        };
+
+        let severity = diagnostic.severity.and_then(|severity| match severity {
+            lsp::DiagnosticSeverity::ERROR => Some(Error),
+            lsp::DiagnosticSeverity::WARNING => Some(Warning),
+            lsp::DiagnosticSeverity::INFORMATION => Some(Info),
+            lsp::DiagnosticSeverity::HINT => Some(Hint),
+            severity => {
+                log::error!("unrecognized diagnostic severity: {:?}", severity);
+                None
+            }
+        });
+
+        if let Some(lang_conf) = language_config {
+            if let Some(severity) = severity {
+                if severity < lang_conf.diagnostic_severity {
+                    return None;
+                }
+            }
+        };
+        use helix_core::diagnostic::{DiagnosticTag, NumberOrString};
+
+        let code = match diagnostic.code.clone() {
+            Some(x) => match x {
+                lsp::NumberOrString::Number(x) => Some(NumberOrString::Number(x)),
+                lsp::NumberOrString::String(x) => Some(NumberOrString::String(x)),
+            },
+            None => None,
+        };
+
+        let tags = if let Some(tags) = &diagnostic.tags {
+            let new_tags = tags
+                .iter()
+                .filter_map(|tag| match *tag {
+                    lsp::DiagnosticTag::DEPRECATED => Some(DiagnosticTag::Deprecated),
+                    lsp::DiagnosticTag::UNNECESSARY => Some(DiagnosticTag::Unnecessary),
+                    _ => None,
+                })
+                .collect();
+
+            new_tags
+        } else {
+            Vec::new()
+        };
+
+        let ends_at_word =
+            start != end && end != 0 && text.get_char(end - 1).is_some_and(char_is_word);
+        let starts_at_word = start != end && text.get_char(start).is_some_and(char_is_word);
+
+        Some(Diagnostic {
+            range: Range { start, end },
+            ends_at_word,
+            starts_at_word,
+            zero_width: start == end,
+            line: diagnostic.range.start.line as usize,
+            message: diagnostic.message.clone(),
+            severity,
+            code,
+            tags,
+            source: diagnostic.source.clone(),
+            data: diagnostic.data.clone(),
+            provider,
+        })
+    }
+
+    #[inline]
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+
+    pub fn replace_diagnostics(
+        &mut self,
+        diagnostics: impl IntoIterator<Item = Diagnostic>,
+        unchanged_sources: &[String],
+        provider: Option<&DiagnosticProvider>,
+    ) {
+        if unchanged_sources.is_empty() {
+            if let Some(provider) = provider {
+                self.diagnostics
+                    .retain(|diagnostic| &diagnostic.provider != provider);
+            } else {
+                self.diagnostics.clear();
+            }
+        } else {
+            self.diagnostics.retain(|d| {
+                if provider.is_some_and(|provider| provider != &d.provider) {
+                    return true;
+                }
+
+                if let Some(source) = &d.source {
+                    unchanged_sources.contains(source)
+                } else {
+                    false
+                }
+            });
+        }
+        self.diagnostics.extend(diagnostics);
+        self.diagnostics.sort_by_key(|diagnostic| {
+            (
+                diagnostic.range,
+                diagnostic.severity,
+                diagnostic.provider.clone(),
+            )
+        });
+    }
+
+    /// clears diagnostics for a given language server id if set, otherwise all diagnostics are cleared
+    pub fn clear_diagnostics_for_language_server(&mut self, id: LanguageServerId) {
+        self.diagnostics
+            .retain(|d| d.provider.language_server_id() != Some(id));
+    }
+
+    pub fn text_width(&self) -> usize {
+        self.editor_config
+            .max_line_length
+            .map(|n| n.get() as usize)
+            .or_else(|| self.language_config().and_then(|config| config.text_width))
+            .unwrap_or_else(|| self.config.load().text_width)
+    }
+
+    pub fn text_format(&self, mut viewport_width: u16, theme: Option<&Theme>) -> TextFormat {
+        let config = self.config.load();
+        let text_width = self.text_width();
+        let mut soft_wrap_at_text_width = self
+            .language_config()
+            .and_then(|config| {
+                config
+                    .soft_wrap
+                    .as_ref()
+                    .and_then(|soft_wrap| soft_wrap.wrap_at_text_width)
+            })
+            .or(config.soft_wrap.wrap_at_text_width)
+            .unwrap_or(false);
+        if soft_wrap_at_text_width {
+            // if the viewport is smaller than the specified
+            // width then this setting has no effcet
+            if text_width >= viewport_width as usize {
+                soft_wrap_at_text_width = false;
+            } else {
+                viewport_width = text_width as u16;
+            }
+        }
+        let config = self.config.load();
+        let editor_soft_wrap = &config.soft_wrap;
+        let language_soft_wrap = self
+            .language
+            .as_ref()
+            .and_then(|config| config.soft_wrap.as_ref());
+        let enable_soft_wrap = language_soft_wrap
+            .and_then(|soft_wrap| soft_wrap.enable)
+            .or(editor_soft_wrap.enable)
+            .unwrap_or(false);
+        let max_wrap = language_soft_wrap
+            .and_then(|soft_wrap| soft_wrap.max_wrap)
+            .or(config.soft_wrap.max_wrap)
+            .unwrap_or(20);
+        let max_indent_retain = language_soft_wrap
+            .and_then(|soft_wrap| soft_wrap.max_indent_retain)
+            .or(editor_soft_wrap.max_indent_retain)
+            .unwrap_or(40);
+        let wrap_indicator = language_soft_wrap
+            .and_then(|soft_wrap| soft_wrap.wrap_indicator.clone())
+            .or_else(|| config.soft_wrap.wrap_indicator.clone())
+            .unwrap_or_else(|| "↪ ".into());
+        let tab_width = self.tab_width() as u16;
+        TextFormat {
+            soft_wrap: enable_soft_wrap && viewport_width > 10,
+            tab_width,
+            max_wrap: max_wrap.min(viewport_width / 4),
+            max_indent_retain: max_indent_retain.min(viewport_width * 2 / 5),
+            // avoid spinning forever when the window manager
+            // sets the size to something tiny
+            viewport_width,
+            wrap_indicator: wrap_indicator.into_boxed_str(),
+            wrap_indicator_highlight: theme
+                .and_then(|theme| theme.find_highlight("ui.virtual.wrap")),
+            soft_wrap_at_text_width,
+        }
+    }
+
+    /// Set the inlay hints for this document and `view_id`.
+    pub fn set_inlay_hints(&mut self, view_id: ViewId, inlay_hints: DocumentInlayHints) {
+        self.inlay_hints.insert(view_id, inlay_hints);
+    }
+
+    pub fn set_jump_labels(&mut self, view_id: ViewId, labels: Vec<Overlay>) {
+        self.jump_labels.insert(view_id, labels);
+    }
+
+    pub fn remove_jump_labels(&mut self, view_id: ViewId) {
+        self.jump_labels.remove(&view_id);
+    }
+
+    pub fn set_document_highlights(
+        &mut self,
+        view_id: ViewId,
+        ranges: Vec<std::ops::Range<usize>>,
+    ) {
+        if ranges.is_empty() {
+            self.document_highlights.remove(&view_id);
+        } else {
+            self.document_highlights
+                .insert(view_id, DocumentHighlights { ranges });
+        }
+    }
+
+    pub fn clear_document_highlights(&mut self, view_id: ViewId) {
+        self.document_highlights.remove(&view_id);
+    }
+
+    pub fn clear_all_document_highlights(&mut self) {
+        self.document_highlights.clear();
+        self.document_highlight_controllers.clear();
+    }
+
+    pub fn document_highlights(&self, view_id: ViewId) -> Option<&[std::ops::Range<usize>]> {
+        self.document_highlights
+            .get(&view_id)
+            .map(|highlights| highlights.ranges.as_slice())
+    }
+
+    pub fn document_highlight_controller(&mut self, view_id: ViewId) -> &mut TaskController {
+        self.document_highlight_controllers
+            .entry(view_id)
+            .or_default()
+    }
+
+    /// Get the inlay hints for this document and `view_id`.
+    pub fn inlay_hints(&self, view_id: ViewId) -> Option<&DocumentInlayHints> {
+        self.inlay_hints.get(&view_id)
+    }
+
+    /// Completely removes all the inlay hints saved for the document, dropping them to free memory
+    /// (since it often means inlay hints have been fully deactivated).
+    pub fn reset_all_inlay_hints(&mut self) {
+        self.inlay_hints = Default::default();
+    }
+
+    pub fn has_language_server_with_feature(&self, feature: LanguageServerFeature) -> bool {
+        self.language_servers_with_feature(feature).next().is_some()
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct ViewData {
+    view_position: ViewPosition,
+}
+
+#[cfg(test)]
+mod test {
+    use arc_swap::ArcSwap;
+
+    use super::*;
+
+    #[test]
+    fn changeset_to_changes_ignore_line_endings() {
+        use helix_lsp::{lsp, Client, OffsetEncoding};
+        let text = Rope::from("hello\r\nworld");
+        let mut doc = Document::from(
+            text,
+            None,
+            Arc::new(ArcSwap::new(Arc::new(Config::default()))),
+            Arc::new(ArcSwap::from_pointee(syntax::Loader::default())),
+        );
+        let view = ViewId::default();
+        doc.set_selection(view, Selection::single(0, 0));
+
+        let transaction =
+            Transaction::change(doc.text(), vec![(5, 7, Some("\n".into()))].into_iter());
+        let old_doc = doc.text().clone();
+        doc.apply(&transaction, view);
+        let changes = Client::changeset_to_changes(
+            &old_doc,
+            doc.text(),
+            transaction.changes(),
+            OffsetEncoding::Utf8,
+        );
+
+        assert_eq!(doc.text(), "hello\nworld");
+
+        assert_eq!(
+            changes,
+            &[lsp::TextDocumentContentChangeEvent {
+                range: Some(lsp::Range::new(
+                    lsp::Position::new(0, 5),
+                    lsp::Position::new(1, 0)
+                )),
+                text: "\n".into(),
+                range_length: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn changeset_to_changes() {
+        use helix_lsp::{lsp, Client, OffsetEncoding};
+        let text = Rope::from("hello");
+        let mut doc = Document::from(
+            text,
+            None,
+            Arc::new(ArcSwap::new(Arc::new(Config::default()))),
+            Arc::new(ArcSwap::from_pointee(syntax::Loader::default())),
+        );
+        let view = ViewId::default();
+        doc.set_selection(view, Selection::single(5, 5));
+
+        // insert
+
+        let transaction = Transaction::insert(doc.text(), doc.selection(view), " world".into());
+        let old_doc = doc.text().clone();
+        doc.apply(&transaction, view);
+        let changes = Client::changeset_to_changes(
+            &old_doc,
+            doc.text(),
+            transaction.changes(),
+            OffsetEncoding::Utf8,
+        );
+
+        assert_eq!(
+            changes,
+            &[lsp::TextDocumentContentChangeEvent {
+                range: Some(lsp::Range::new(
+                    lsp::Position::new(0, 5),
+                    lsp::Position::new(0, 5)
+                )),
+                text: " world".into(),
+                range_length: None,
+            }]
+        );
+
+        // delete
+
+        let transaction = transaction.invert(&old_doc);
+        let old_doc = doc.text().clone();
+        doc.apply(&transaction, view);
+        let changes = Client::changeset_to_changes(
+            &old_doc,
+            doc.text(),
+            transaction.changes(),
+            OffsetEncoding::Utf8,
+        );
+
+        // line: 0-based.
+        // col: 0-based, gaps between chars.
+        // 0 1 2 3 4 5 6 7 8 9 0 1
+        // |h|e|l|l|o| |w|o|r|l|d|
+        //           -------------
+        // (0, 5)-(0, 11)
+        assert_eq!(
+            changes,
+            &[lsp::TextDocumentContentChangeEvent {
+                range: Some(lsp::Range::new(
+                    lsp::Position::new(0, 5),
+                    lsp::Position::new(0, 11)
+                )),
+                text: "".into(),
+                range_length: None,
+            }]
+        );
+
+        // replace
+
+        // also tests that changes are layered, positions depend on previous changes.
+
+        doc.set_selection(view, Selection::single(0, 5));
+        let transaction = Transaction::change(
+            doc.text(),
+            vec![(0, 2, Some("aei".into())), (3, 5, Some("ou".into()))].into_iter(),
+        );
+        // aeilou
+        let old_doc = doc.text().clone();
+        doc.apply(&transaction, view);
+        let changes = Client::changeset_to_changes(
+            &old_doc,
+            doc.text(),
+            transaction.changes(),
+            OffsetEncoding::Utf8,
+        );
+
+        assert_eq!(
+            changes,
+            &[
+                // 0 1 2 3 4 5
+                // |h|e|l|l|o|
+                // ----
+                //
+                // aeillo
+                lsp::TextDocumentContentChangeEvent {
+                    range: Some(lsp::Range::new(
+                        lsp::Position::new(0, 0),
+                        lsp::Position::new(0, 2)
+                    )),
+                    text: "aei".into(),
+                    range_length: None,
+                },
+                // 0 1 2 3 4 5 6
+                // |a|e|i|l|l|o|
+                //         -----
+                //
+                // aeilou
+                lsp::TextDocumentContentChangeEvent {
+                    range: Some(lsp::Range::new(
+                        lsp::Position::new(0, 4),
+                        lsp::Position::new(0, 6)
+                    )),
+                    text: "ou".into(),
+                    range_length: None,
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn test_line_ending() {
+        assert_eq!(
+            Document::default(
+                Arc::new(ArcSwap::new(Arc::new(Config::default()))),
+                Arc::new(ArcSwap::from_pointee(syntax::Loader::default()))
+            )
+            .text()
+            .to_string(),
+            helix_core::NATIVE_LINE_ENDING.as_str()
+        );
+    }
+
+    macro_rules! decode {
+        ($name:ident, $label:expr, $label_override:expr) => {
+            #[test]
+            fn $name() {
+                let encoding = encoding::Encoding::for_label($label_override.as_bytes()).unwrap();
+                let base_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/encoding");
+                let path = base_path.join(format!("{}_in.txt", $label));
+                let ref_path = base_path.join(format!("{}_in_ref.txt", $label));
+                assert!(path.exists());
+                assert!(ref_path.exists());
+
+                let mut file = std::fs::File::open(path).unwrap();
+                let text = from_reader(&mut file, Some(encoding.into()))
+                    .unwrap()
+                    .0
+                    .to_string();
+                let expectation = std::fs::read_to_string(ref_path).unwrap();
+                assert_eq!(text[..], expectation[..]);
+            }
+        };
+        ($name:ident, $label:expr) => {
+            decode!($name, $label, $label);
+        };
+    }
+
+    decode!(big5_decode, "big5");
+    decode!(euc_kr_decode, "euc_kr", "EUC-KR");
+    decode!(gb18030_decode, "gb18030");
+    decode!(iso_2022_jp_decode, "iso_2022_jp", "ISO-2022-JP");
+    decode!(jis0208_decode, "jis0208", "EUC-JP");
+    decode!(jis0212_decode, "jis0212", "EUC-JP");
+    decode!(shift_jis_decode, "shift_jis");
+}

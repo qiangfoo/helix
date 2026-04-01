@@ -1,6 +1,6 @@
 use anyhow::Result;
 use helix_core::Position;
-use helix_view::tree::Layout;
+use crate::view::tree::Layout;
 use indexmap::IndexMap;
 use std::path::{Path, PathBuf};
 

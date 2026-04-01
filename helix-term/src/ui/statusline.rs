@@ -1,8 +1,8 @@
 use helix_core::indent::IndentStyle;
 use helix_core::{coords_at_pos, encoding, unicode::width::UnicodeWidthStr, Position};
 use helix_lsp::lsp::DiagnosticSeverity;
-use helix_view::document::DEFAULT_LANGUAGE_NAME;
-use helix_view::{
+use crate::view::document::DEFAULT_LANGUAGE_NAME;
+use crate::view::{
     document::{Mode, SCRATCH_BUFFER_NAME},
     graphics::{Rect, RectExt},
     theme::Style,
@@ -11,7 +11,7 @@ use helix_view::{
 
 use crate::ui::ProgressSpinners;
 
-use helix_view::editor::StatusLineElement as StatusLineElementID;
+use crate::view::editor::StatusLineElement as StatusLineElementID;
 use ratatui::buffer::Buffer as Surface;
 use ratatui::text::{Span, Line};
 
@@ -130,34 +130,34 @@ where
     F: Fn(&mut RenderContext<'a>, Span<'a>) + Copy,
 {
     match element_id {
-        helix_view::editor::StatusLineElement::Mode => render_mode,
-        helix_view::editor::StatusLineElement::Spinner => render_lsp_spinner,
-        helix_view::editor::StatusLineElement::FileBaseName => render_file_base_name,
-        helix_view::editor::StatusLineElement::FileName => render_file_name,
-        helix_view::editor::StatusLineElement::FileAbsolutePath => render_file_absolute_path,
-        helix_view::editor::StatusLineElement::FileModificationIndicator => {
+        crate::view::editor::StatusLineElement::Mode => render_mode,
+        crate::view::editor::StatusLineElement::Spinner => render_lsp_spinner,
+        crate::view::editor::StatusLineElement::FileBaseName => render_file_base_name,
+        crate::view::editor::StatusLineElement::FileName => render_file_name,
+        crate::view::editor::StatusLineElement::FileAbsolutePath => render_file_absolute_path,
+        crate::view::editor::StatusLineElement::FileModificationIndicator => {
             render_file_modification_indicator
         }
-        helix_view::editor::StatusLineElement::ReadOnlyIndicator => render_read_only_indicator,
-        helix_view::editor::StatusLineElement::FileEncoding => render_file_encoding,
-        helix_view::editor::StatusLineElement::FileLineEnding => render_file_line_ending,
-        helix_view::editor::StatusLineElement::FileIndentStyle => render_file_indent_style,
-        helix_view::editor::StatusLineElement::FileType => render_file_type,
-        helix_view::editor::StatusLineElement::Diagnostics => render_diagnostics,
-        helix_view::editor::StatusLineElement::WorkspaceDiagnostics => render_workspace_diagnostics,
-        helix_view::editor::StatusLineElement::Selections => render_selections,
-        helix_view::editor::StatusLineElement::PrimarySelectionLength => {
+        crate::view::editor::StatusLineElement::ReadOnlyIndicator => render_read_only_indicator,
+        crate::view::editor::StatusLineElement::FileEncoding => render_file_encoding,
+        crate::view::editor::StatusLineElement::FileLineEnding => render_file_line_ending,
+        crate::view::editor::StatusLineElement::FileIndentStyle => render_file_indent_style,
+        crate::view::editor::StatusLineElement::FileType => render_file_type,
+        crate::view::editor::StatusLineElement::Diagnostics => render_diagnostics,
+        crate::view::editor::StatusLineElement::WorkspaceDiagnostics => render_workspace_diagnostics,
+        crate::view::editor::StatusLineElement::Selections => render_selections,
+        crate::view::editor::StatusLineElement::PrimarySelectionLength => {
             render_primary_selection_length
         }
-        helix_view::editor::StatusLineElement::Position => render_position,
-        helix_view::editor::StatusLineElement::PositionPercentage => render_position_percentage,
-        helix_view::editor::StatusLineElement::TotalLineNumbers => render_total_line_numbers,
-        helix_view::editor::StatusLineElement::Separator => render_separator,
-        helix_view::editor::StatusLineElement::Spacer => render_spacer,
-        helix_view::editor::StatusLineElement::VersionControl => render_version_control,
-        helix_view::editor::StatusLineElement::Register => render_register,
-        helix_view::editor::StatusLineElement::CurrentWorkingDirectory => render_cwd,
-        helix_view::editor::StatusLineElement::GitWorktree => render_git_worktree,
+        crate::view::editor::StatusLineElement::Position => render_position,
+        crate::view::editor::StatusLineElement::PositionPercentage => render_position_percentage,
+        crate::view::editor::StatusLineElement::TotalLineNumbers => render_total_line_numbers,
+        crate::view::editor::StatusLineElement::Separator => render_separator,
+        crate::view::editor::StatusLineElement::Spacer => render_spacer,
+        crate::view::editor::StatusLineElement::VersionControl => render_version_control,
+        crate::view::editor::StatusLineElement::Register => render_register,
+        crate::view::editor::StatusLineElement::CurrentWorkingDirectory => render_cwd,
+        crate::view::editor::StatusLineElement::GitWorktree => render_git_worktree,
     }
 }
 

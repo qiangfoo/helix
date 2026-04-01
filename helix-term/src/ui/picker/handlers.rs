@@ -114,7 +114,7 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> AsyncHook
                             if let Some(CachedPreview::Document(ref mut doc)) =
                                 picker.preview_cache.get_mut(&path)
                             {
-                                let diagnostics = helix_view::Editor::doc_diagnostics(
+                                let diagnostics = crate::view::Editor::doc_diagnostics(
                                     &editor.language_servers,
                                     &editor.diagnostics,
                                     doc,

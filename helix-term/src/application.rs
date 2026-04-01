@@ -7,7 +7,7 @@ use helix_lsp::{
     LanguageServerId, LspProgressMap,
 };
 // get_relative_path is no longer used after removing document write handling
-use helix_view::{
+use crate::view::{
     align_view,
     document::DocumentOpenError,
     editor::{ConfigEvent, EditorEvent},
@@ -685,7 +685,7 @@ impl Application {
                             language_server.did_change_configuration(config.clone());
                         }
 
-                        helix_event::dispatch(helix_view::events::LanguageServerInitialized {
+                        helix_event::dispatch(crate::view::events::LanguageServerInitialized {
                             editor: &mut self.editor,
                             server_id,
                         });
@@ -816,7 +816,7 @@ impl Application {
                         // Clear any diagnostics for the document with this server open.
                         self.editor.tabs[self.editor.active_tab].doc_mut().clear_diagnostics_for_language_server(server_id);
 
-                        helix_event::dispatch(helix_view::events::LanguageServerExited {
+                        helix_event::dispatch(crate::view::events::LanguageServerExited {
                             editor: &mut self.editor,
                             server_id,
                         });

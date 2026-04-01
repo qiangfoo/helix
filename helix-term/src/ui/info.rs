@@ -1,6 +1,6 @@
 use crate::compositor::{Component, Context};
-use helix_view::graphics::{Margin, Rect};
-use helix_view::info::Info;
+use crate::view::graphics::{Margin, Rect};
+use crate::view::info::Info;
 use ratatui::buffer::Buffer as Surface;
 use ratatui::text::Text;
 use ratatui::widgets::{Block, Paragraph, Widget};

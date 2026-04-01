@@ -1,6 +1,6 @@
 use helix_event::register_hook;
-use helix_view::events::DocumentFocusLost;
-use helix_view::handlers::Handlers;
+use crate::view::events::DocumentFocusLost;
+use crate::view::handlers::Handlers;
 
 use crate::job::{self};
 use crate::layers::EditorLayers;

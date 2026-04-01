@@ -5,9 +5,9 @@
 
 use helix_core::textobject::{self, TextObject};
 use helix_core::Range;
-use helix_view::graphics::{CursorKind, Rect};
-use helix_view::info::Info;
-use helix_view::Editor;
+use crate::view::graphics::{CursorKind, Rect};
+use crate::view::info::Info;
+use crate::view::Editor;
 use ratatui::buffer::Buffer as Surface;
 
 use crate::compositor::{self, Callback, Component, Context, EventResult};
@@ -81,7 +81,7 @@ impl Component for TextObjectMenu {
 
         // Build the textobject motion and apply it
         let textobject_motion = move |editor: &mut Editor| {
-            let (view, doc) = helix_view::current!(editor);
+            let (view, doc) = current!(editor);
             let loader = editor.syn_loader.load();
             let text = doc.text().slice(..);
 

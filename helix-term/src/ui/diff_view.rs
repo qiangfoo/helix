@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 
 use helix_core::text_annotations::TextAnnotations;
 use helix_core::Rope;
-use helix_view::graphics::{Color, CursorKind, Rect, RectExt};
-use helix_view::input::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use helix_view::keyboard::{KeyCode, KeyModifiers};
-use helix_view::theme::Style;
-use helix_view::view::ViewPosition;
-use helix_view::{Document, Editor};
+use crate::view::graphics::{Color, CursorKind, Rect, RectExt};
+use crate::view::input::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crate::view::keyboard::{KeyCode, KeyModifiers};
+use crate::view::theme::Style;
+use crate::view::view::ViewPosition;
+use crate::view::{Document, Editor};
 
 /// Dim an RGB color for use as a subtle background tint.
 fn dim_color(color: Color) -> Color {
@@ -358,14 +358,14 @@ impl DiffView {
             let diff_style = cx.editor.theme.get("diff.plus");
             match diff_style.fg {
                 Some(fg) => Style::default().bg(dim_color(fg)),
-                None => Style::default().bg(helix_view::graphics::Color::Rgb(0, 40, 0)),
+                None => Style::default().bg(crate::view::graphics::Color::Rgb(0, 40, 0)),
             }
         };
         let deleted_bg = {
             let diff_style = cx.editor.theme.get("diff.minus");
             match diff_style.fg {
                 Some(fg) => Style::default().bg(dim_color(fg)),
-                None => Style::default().bg(helix_view::graphics::Color::Rgb(40, 0, 0)),
+                None => Style::default().bg(crate::view::graphics::Color::Rgb(40, 0, 0)),
             }
         };
         let hunk_header_style = cx

@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use helix_core::syntax::{self, OverlayHighlights};
-use helix_view::graphics::{Margin, Rect, RectExt, Style};
-use helix_view::input::Event;
+use crate::view::graphics::{Margin, Rect, RectExt, Style};
+use crate::view::input::Event;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Alignment;
 use ratatui::text::Text;
@@ -58,7 +58,7 @@ impl SignatureHelp {
         self.lsp_signature
     }
 
-    pub fn visible_popup(editor: &mut helix_view::Editor) -> Option<&mut Popup<Self>> {
+    pub fn visible_popup(editor: &mut crate::view::Editor) -> Option<&mut Popup<Self>> {
         use crate::layers::EditorLayers;
         editor.find_layer_id::<Popup<Self>>(Self::ID)
     }

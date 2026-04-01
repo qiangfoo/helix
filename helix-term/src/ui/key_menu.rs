@@ -5,8 +5,8 @@
 //! keypress: executing the matched command, descending into a sub-menu, or
 //! closing on unknown/escape keys.
 
-use helix_view::graphics::{CursorKind, Rect};
-use helix_view::Editor;
+use crate::view::graphics::{CursorKind, Rect};
+use crate::view::Editor;
 use ratatui::buffer::Buffer as Surface;
 
 use crate::commands;

@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use helix_view::graphics::{CursorKind, Rect};
-use helix_view::Editor;
+use crate::view::graphics::{CursorKind, Rect};
+use crate::view::Editor;
 
 use ratatui::buffer::Buffer as Surface;
 
@@ -23,7 +23,7 @@ pub struct LayerState {
     pub full_redraw: bool,
     pub area: Rect,
     /// Keys queued for replay (e.g. from macros). Drained in the main event loop.
-    pub pending_keys: Vec<helix_view::input::KeyEvent>,
+    pub pending_keys: Vec<crate::view::input::KeyEvent>,
     /// helix-term Config, used for building keymaps.
     pub term_config: Option<Arc<ArcSwap<Config>>>,
 }
@@ -75,8 +75,8 @@ pub trait EditorLayers {
     fn layer_area(&self) -> Rect;
     fn resize_layers(&mut self, area: Rect);
 
-    fn queue_macro_keys(&mut self, keys: Vec<helix_view::input::KeyEvent>);
-    fn drain_pending_keys(&mut self) -> Vec<helix_view::input::KeyEvent>;
+    fn queue_macro_keys(&mut self, keys: Vec<crate::view::input::KeyEvent>);
+    fn drain_pending_keys(&mut self) -> Vec<crate::view::input::KeyEvent>;
 
     fn handle_layer_event(&mut self, event: &Event, jobs: &mut crate::job::Jobs) -> bool;
     fn render_layers(&mut self, area: Rect, surface: &mut Surface, jobs: &mut crate::job::Jobs);
@@ -159,11 +159,11 @@ impl EditorLayers for Editor {
         layer_state_mut(self).area = area;
     }
 
-    fn queue_macro_keys(&mut self, keys: Vec<helix_view::input::KeyEvent>) {
+    fn queue_macro_keys(&mut self, keys: Vec<crate::view::input::KeyEvent>) {
         layer_state_mut(self).pending_keys.extend(keys);
     }
 
-    fn drain_pending_keys(&mut self) -> Vec<helix_view::input::KeyEvent> {
+    fn drain_pending_keys(&mut self) -> Vec<crate::view::input::KeyEvent> {
         std::mem::take(&mut layer_state_mut(self).pending_keys)
     }
 

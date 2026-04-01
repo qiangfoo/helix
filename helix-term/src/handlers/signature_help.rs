@@ -5,10 +5,10 @@ use helix_core::syntax::config::LanguageServerFeature;
 use helix_event::{cancelable_future, register_hook, send_blocking, TaskController, TaskHandle};
 use helix_lsp::lsp::{self, SignatureInformation};
 use helix_stdx::rope::RopeSliceExt;
-use helix_view::document::Mode;
-use helix_view::events::{DocumentDidChange, SelectionDidChange};
-use helix_view::handlers::lsp::{SignatureHelpEvent, SignatureHelpInvoked};
-use helix_view::Editor;
+use crate::view::document::Mode;
+use crate::view::events::{DocumentDidChange, SelectionDidChange};
+use crate::view::handlers::lsp::{SignatureHelpEvent, SignatureHelpInvoked};
+use crate::view::Editor;
 use tokio::sync::mpsc::Sender;
 use tokio::time::Instant;
 
@@ -320,7 +320,7 @@ pub(super) fn register_hooks(handlers: &Handlers) {
         match (event.old_mode, event.new_mode) {
             (Mode::Normal, _) => {
                 send_blocking(&tx, SignatureHelpEvent::Cancel);
-                event.cx.callback.push(Box::new(|editor: &mut helix_view::Editor| {
+                event.cx.callback.push(Box::new(|editor: &mut crate::view::Editor| {
                     use crate::layers::EditorLayers;
                     editor.remove_layer(SignatureHelp::ID);
                 }));

@@ -32,7 +32,7 @@ use helix_core::{
     visual_offset_from_block, Range, RopeReader, RopeSlice,
     Selection, SmallVec,
 };
-use helix_view::{
+use crate::view::{
     document::{Mode, SCRATCH_BUFFER_NAME},
     editor::Action,
     input::KeyEvent,
@@ -153,7 +153,7 @@ where
     })
 }
 
-use helix_view::{align_view, Align};
+use crate::view::{align_view, Align};
 
 /// MappableCommands are commands that can be bound to keys, executable in
 /// normal, insert or select mode.
@@ -493,7 +493,7 @@ impl std::str::FromStr for MappableCommand {
                 })
                 .ok_or_else(|| anyhow!("No TypableCommand named '{}'", s))
         } else if let Some(suffix) = s.strip_prefix('@') {
-            helix_view::input::parse_macro(suffix).map(|keys| Self::Macro {
+            crate::view::input::parse_macro(suffix).map(|keys| Self::Macro {
                 name: s.to_string(),
                 keys,
             })
@@ -1021,7 +1021,7 @@ fn goto_file_vsplit(cx: &mut Context) {
 /// Returns true when a selection overlaps an LSP document link range.
 fn selection_overlaps_document_link(
     selection: &Range,
-    link: &helix_view::document::DocumentLink,
+    link: &crate::view::document::DocumentLink,
 ) -> bool {
     if selection.is_empty() {
         let pos = selection.from();
@@ -1034,7 +1034,7 @@ fn selection_overlaps_document_link(
 /// Resolve a document link target, using the LSP resolve request when needed.
 fn resolve_document_link_target(
     editor: &Editor,
-    link: &helix_view::document::DocumentLink,
+    link: &crate::view::document::DocumentLink,
 ) -> Option<Url> {
     if let Some(target) = link.link.target.clone() {
         return Some(target);
@@ -1763,7 +1763,7 @@ fn global_search(cx: &mut Context) {
 
     struct GlobalSearchConfig {
         smart_case: bool,
-        file_picker_config: helix_view::editor::FilePickerConfig,
+        file_picker_config: crate::view::editor::FilePickerConfig,
         directory_style: Style,
         number_style: Style,
         colon_style: Style,
@@ -3331,8 +3331,8 @@ fn split(editor: &mut Editor, action: Action) {
     // Create a new split view for the same document
     let new_view = View::new(id, editor.config().gutters.clone());
     let layout = match action {
-        Action::HorizontalSplit => helix_view::tree::Layout::Horizontal,
-        _ => helix_view::tree::Layout::Vertical,
+        Action::HorizontalSplit => crate::view::tree::Layout::Horizontal,
+        _ => crate::view::tree::Layout::Vertical,
     };
     editor.tabs[editor.active_tab].tree_mut().split(new_view, layout);
 

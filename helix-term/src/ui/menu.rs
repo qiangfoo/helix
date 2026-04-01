@@ -8,7 +8,7 @@ use ratatui::{buffer::Buffer as Surface, widgets::Table};
 pub use ratatui::widgets::{Cell, Row};
 use ratatui::text::Line;
 
-use helix_view::{graphics::{Rect, RectExt}, Editor};
+use crate::view::{graphics::{Rect, RectExt}, Editor};
 use ratatui::layout::Constraint;
 
 pub trait Item: Sync + Send + 'static {
@@ -393,11 +393,11 @@ impl<T: Item + 'static> Component for Menu<T> {
                 if scroll_line <= i && i < scroll_line + scroll_height {
                     // Draw scroll thumb
                     cell.set_symbol(half_block);
-                    cell.set_fg(scroll_style.fg.unwrap_or(helix_view::theme::Color::Reset).into());
+                    cell.set_fg(scroll_style.fg.unwrap_or(crate::view::theme::Color::Reset).into());
                 } else if !render_borders {
                     // Draw scroll track
                     cell.set_symbol(half_block);
-                    cell.set_fg(scroll_style.bg.unwrap_or(helix_view::theme::Color::Reset).into());
+                    cell.set_fg(scroll_style.bg.unwrap_or(crate::view::theme::Color::Reset).into());
                 }
             }
         }
