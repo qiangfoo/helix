@@ -372,6 +372,7 @@ impl MappableCommand {
         extend_to_column, "Extend to column",
         goto_next_tab, "Goto next tab",
         goto_previous_tab, "Goto previous tab",
+        close_active_tab, "Close the current tab",
         goto_line_end_newline, "Goto newline at line end",
         goto_first_nonwhitespace, "Goto first non-blank in line",
         trim_selections, "Trim whitespace from selections",
@@ -742,6 +743,14 @@ fn goto_next_tab(cx: &mut Context) {
 fn goto_previous_tab(cx: &mut Context) {
     use crate::ui::EditorApps;
     cx.editor.prev_app();
+}
+
+fn close_active_tab(cx: &mut Context) {
+    crate::session::save_session(cx.editor);
+    cx.callback.push(Box::new(|editor: &mut Editor| {
+        use crate::ui::EditorApps;
+        editor.close_active_app();
+    }));
 }
 
 fn extend_to_line_start(cx: &mut Context) {

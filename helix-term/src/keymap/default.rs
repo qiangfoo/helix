@@ -185,6 +185,7 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "k" => hover,
             "h" => select_references_to_symbol_under_cursor,
             "?" => command_palette,
+            "q" => close_active_tab,
         },
         "z" => { "View"
             "z" | "c" => align_view_center,
