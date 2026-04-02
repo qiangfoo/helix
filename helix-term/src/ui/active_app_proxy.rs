@@ -9,10 +9,25 @@ use crate::view::Editor;
 use ratatui::buffer::Buffer as Surface;
 
 use crate::compositor::{self, Component, Context, EventResult};
+use crate::ui::app::Application;
 
-use super::app::{get_app, Application};
+/// Placeholder Application used during take/restore to split borrows.
+/// Stores the real app's ID so that `editor.apps[idx].id()` returns the
+/// correct value even while the real app is temporarily taken out.
+struct Placeholder {
+    real_id: crate::view::AppId,
+}
 
-type AppBox = Box<dyn Application>;
+impl Application for Placeholder {
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn id(&self) -> crate::view::AppId { self.real_id }
+    fn name(&self, _: &Editor) -> String { String::new() }
+    fn handle_event(&mut self, _: &crate::view::input::Event, _: &mut Context) -> EventResult {
+        EventResult::Ignored(None)
+    }
+    fn render(&mut self, _: Rect, _: &mut Surface, _: &mut Context) {}
+}
 
 /// A stateless Component that delegates to `editor.apps[active_app]`.
 pub struct ActiveAppProxy;
@@ -28,13 +43,10 @@ impl Component for ActiveAppProxy {
             return EventResult::Ignored(None);
         }
         // Take the active app out to split the borrow with ctx.editor
-        let mut app_any = std::mem::replace(&mut ctx.editor.apps[idx], Box::new(()));
-        let result = if let Some(app) = app_any.downcast_mut::<AppBox>() {
-            app.handle_event(event, ctx)
-        } else {
-            EventResult::Ignored(None)
-        };
-        ctx.editor.apps[idx] = app_any;
+        let real_id = ctx.editor.apps[idx].id();
+        let mut app = std::mem::replace(&mut ctx.editor.apps[idx], Box::new(Placeholder { real_id }));
+        let result = app.handle_event(event, ctx);
+        ctx.editor.apps[idx] = app;
         result
     }
 
@@ -44,15 +56,14 @@ impl Component for ActiveAppProxy {
             return;
         }
         let main_area = ctx.editor.main_area;
-        let mut app_any = std::mem::replace(&mut ctx.editor.apps[idx], Box::new(()));
-        if let Some(app) = app_any.downcast_mut::<AppBox>() {
-            app.render(main_area, surface, ctx);
-        }
-        ctx.editor.apps[idx] = app_any;
+        let real_id = ctx.editor.apps[idx].id();
+        let mut app = std::mem::replace(&mut ctx.editor.apps[idx], Box::new(Placeholder { real_id }));
+        app.render(main_area, surface, ctx);
+        ctx.editor.apps[idx] = app;
     }
 
     fn cursor(&self, _area: Rect, editor: &Editor) -> (Option<Position>, CursorKind) {
-        if let Some(app) = get_app(editor, editor.active_app) {
+        if let Some(app) = editor.apps.get(editor.active_app) {
             return app.cursor(editor.main_area, editor);
         }
         (None, CursorKind::Hidden)

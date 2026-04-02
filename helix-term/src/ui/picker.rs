@@ -614,9 +614,9 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
 
         match path_or_id {
             PathOrId::Path(path) => {
-                if let Some(dv) = editor.tabs.get(editor.active_tab) {
-                    if dv.doc().path().map_or(false, |p| p == path) {
-                        return Some((Preview::EditorDocument(dv.doc()), range));
+                if let Some(dv) = editor.active_doc_view() {
+                    if dv.doc.path().map_or(false, |p| p == path) {
+                        return Some((Preview::EditorDocument(&dv.doc), range));
                     }
                 }
 
@@ -700,11 +700,9 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
                 Some((Preview::Cached(&self.preview_cache[&path]), range))
             }
             PathOrId::Id(id) => {
-                if editor.tabs[editor.active_tab].doc().id() == id {
-                    Some((Preview::EditorDocument(editor.tabs[editor.active_tab].doc()), range))
-                } else {
-                    None
-                }
+                editor.active_doc_view()
+                    .filter(|dv| dv.doc.id() == id)
+                    .map(|dv| (Preview::EditorDocument(&dv.doc), range))
             }
         }
     }

@@ -15,7 +15,6 @@ pub mod info;
 pub mod input;
 pub mod keyboard;
 pub mod register;
-pub mod tab;
 pub mod theme;
 pub mod tree;
 pub mod view;

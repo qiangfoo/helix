@@ -138,11 +138,13 @@ fn jump_to_position(
     ) {
         Ok(mut doc) => {
             // Initialize the new document for the current view, then replace.
-            let view_id = editor.tabs[editor.active_tab].tree().focus;
-            let view_id = editor.tabs[editor.active_tab].tree().get(view_id).id;
+            let dv = editor.active_doc_view().unwrap();
+            let view_id = dv.tree.get(dv.tree.focus).id;
             doc.ensure_view_init(view_id);
-            *editor.tabs[editor.active_tab].doc_mut() = doc;
-            editor.launch_language_servers(editor.tabs[editor.active_tab].doc().id());
+            let dv = editor.active_doc_view_mut().unwrap();
+            dv.doc = doc;
+            let doc_id = dv.doc.id();
+            editor.launch_language_servers(doc_id);
         }
         Err(err) => {
             let err = format!("failed to open path: {:?}: {:?}", path, err);
@@ -919,9 +921,9 @@ pub fn compute_inlay_hints_for_all_views(editor: &mut Editor, jobs: &mut crate::
         return;
     }
 
-    let dv = &editor.tabs[editor.active_tab];
-    for (view, _) in dv.tree().views() {
-        let doc = dv.doc();
+    let dv = editor.active_doc_view().unwrap();
+    for (view, _) in dv.tree.views() {
+        let doc = &dv.doc;
         if let Some(callback) = compute_inlay_hints_for_view(view, doc) {
             jobs.callback(callback);
         }
@@ -983,15 +985,15 @@ fn compute_inlay_hints_for_view(
         language_server.text_document_range_inlay_hints(doc.identifier(), range, None)?,
         move |editor, response: Option<Vec<lsp::InlayHint>>| {
             // The config was modified or the window was closed while the request was in flight
-            if !editor.config().lsp.display_inlay_hints || editor.tabs[editor.active_tab].tree().try_get(view_id).is_none() {
+            if !editor.config().lsp.display_inlay_hints || editor.active_doc_view().is_none_or(|dv| dv.tree.try_get(view_id).is_none()) {
                 return;
             }
 
             // Add annotations to relevant document, not the current one (it may have changed in between)
-            if editor.tabs[editor.active_tab].doc().id() != doc_id {
+            if editor.active_doc_view().is_none_or(|dv| dv.doc.id() != doc_id) {
                 return;
             }
-            let doc = editor.tabs[editor.active_tab].doc_mut();
+            let doc = &mut editor.active_doc_view_mut().unwrap().doc;
 
             // If we have neither hints nor an LSP, empty the inlay hints since they're now oudated
             let mut hints = match response {

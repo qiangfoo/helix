@@ -142,21 +142,23 @@ fn dispatch_reloads(paths: Vec<PathBuf>) {
         let scrolloff = editor.config().scrolloff;
 
         for path in &paths {
+            let Some(dv) = editor.active_doc_view() else { continue };
             // Check if the current document matches this path
-            let doc_path = editor.tabs[editor.active_tab].doc().path().cloned();
+            let doc_path = dv.doc.path().cloned();
             if doc_path.as_deref() != Some(path.as_path()) {
                 log::debug!("file_watcher: no document found for path {:?}", path);
                 continue;
             }
 
-            let view_ids: Vec<_> = editor.tabs[editor.active_tab].doc().selections().keys().cloned().collect();
+            let view_ids: Vec<_> = dv.doc.selections().keys().cloned().collect();
             if view_ids.is_empty() {
                 continue;
             }
 
             {
-                let tab = &mut editor.tabs[editor.active_tab];
-                let (doc, tree) = tab.doc_and_tree_mut();
+                let app_id = editor.apps[editor.active_app].id();
+                let dv = editor.doc_views.get_mut(&app_id).unwrap();
+                let (doc, tree) = dv.doc_and_tree_mut();
                 let view = tree.get_mut(view_ids[0]);
                 view.sync_changes(doc);
 
@@ -167,7 +169,7 @@ fn dispatch_reloads(paths: Vec<PathBuf>) {
                 }
             }
 
-            if let Some(path) = editor.tabs[editor.active_tab].doc().path().cloned() {
+            if let Some(path) = editor.active_doc_view().unwrap().doc.path().cloned() {
                 editor
                     .language_servers
                     .file_event_handler
@@ -175,13 +177,13 @@ fn dispatch_reloads(paths: Vec<PathBuf>) {
             }
 
             for &view_id in &view_ids {
-                let tab = &mut editor.tabs[editor.active_tab];
-                let (doc, tree) = tab.doc_and_tree_mut();
+                let dv = editor.active_doc_view_mut().unwrap();
+                let (doc, tree) = dv.doc_and_tree_mut();
                 let view = tree.get_mut(view_id);
                 view.ensure_cursor_in_view(doc, scrolloff);
             }
 
-            let name = editor.tabs[editor.active_tab].doc()
+            let name = editor.active_doc_view().unwrap().doc
                 .path()
                 .and_then(|p| p.file_name())
                 .map(|n| n.to_string_lossy().to_string())
@@ -198,23 +200,20 @@ fn dispatch_diff_refreshes() {
         let diff_providers = editor.diff_providers.clone();
 
         // Check if the active app is a DiffView with LocalChanges
-        let diff_view_cwd: Option<std::path::PathBuf> = {
-            use crate::ui::app::get_app;
-            get_app(editor, editor.active_app)
-                .and_then(|app| app.as_any().downcast_ref::<DiffView>())
-                .and_then(|dv| match dv.diff_key() {
-                    DiffKey::LocalChanges => Some(dv.cwd().to_path_buf()),
-                    DiffKey::CommitDiff { .. } => None,
-                })
-        };
+        let diff_view_cwd: Option<std::path::PathBuf> = editor.apps
+            .get(editor.active_app)
+            .and_then(|app| app.as_any().downcast_ref::<DiffView>())
+            .and_then(|dv| match dv.diff_key() {
+                DiffKey::LocalChanges => Some(dv.cwd().to_path_buf()),
+                DiffKey::CommitDiff { .. } => None,
+            });
 
         if let Some(cwd) = diff_view_cwd {
             // Refresh DiffView in background
             tokio::task::spawn_blocking(move || {
                 let files = diff_providers.get_local_diff_files(&cwd).unwrap_or_default();
                 job::dispatch_blocking(move |editor| {
-                    use crate::ui::app::get_app_mut;
-                    if let Some(app) = get_app_mut(editor, editor.active_app) {
+                    if let Some(app) = editor.apps.get_mut(editor.active_app) {
                         if let Some(dv) = app.as_any_mut().downcast_mut::<DiffView>() {
                             if matches!(dv.diff_key(), DiffKey::LocalChanges) {
                                 dv.refresh(files);
@@ -230,7 +229,8 @@ fn dispatch_diff_refreshes() {
 pub fn register_hooks(handlers: &Handlers) {
     let tx = handlers.file_watcher.clone();
     register_hook!(move |event: &mut DocumentDidOpen<'_>| {
-        let doc = event.editor.tabs[event.editor.active_tab].doc();
+        let Some(dv) = event.editor.active_doc_view() else { return Ok(()) };
+        let doc = &dv.doc;
         if let Some(path) = doc.path().cloned() {
             helix_event::send_blocking(&tx, FileWatcherCommand::Watch { path });
         }

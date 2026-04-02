@@ -319,7 +319,9 @@ impl fmt::Debug for DocumentInlayHintsId {
 
 impl EditorState {
     pub(crate) fn clear_doc_relative_paths(&mut self) {
-        self.tabs[self.active_tab].doc_mut().relative_path.take();
+        if let Some(dv) = self.active_doc_view_mut() {
+            dv.doc.relative_path.take();
+        }
     }
 }
 

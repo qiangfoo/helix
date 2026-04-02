@@ -31,9 +31,9 @@ pub fn save_session(editor: &Editor) {
         return;
     };
 
-    let files: Vec<PathBuf> = editor.tabs
-        .iter()
-        .filter_map(|dv| dv.doc().path().cloned())
+    let files: Vec<PathBuf> = editor.doc_views
+        .values()
+        .filter_map(|dv| dv.doc.path().cloned())
         .collect();
 
     if files.is_empty() {

@@ -334,9 +334,9 @@ impl AppBuilder {
         let mut app = Application::new(self.args, self.config, self.syn_loader)?;
 
         // If no files were opened (e.g. no session to restore), the editor
-        // shows the welcome page and editor.tabs is empty.  Tests that use
+        // shows the welcome page and editor.doc_views is empty.  Tests that use
         // current!() need at least one tab, so create a scratch document.
-        if app.editor.tab_count() == 0 {
+        if app.editor.doc_views.is_empty() {
             let doc = helix_term::view::Document::default(
                 app.editor.config.clone(),
                 app.editor.syn_loader.clone(),

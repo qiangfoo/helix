@@ -735,11 +735,13 @@ fn goto_line_start(cx: &mut Context) {
 }
 
 fn goto_next_tab(cx: &mut Context) {
-    cx.editor.next_tab();
+    use crate::ui::EditorApps;
+    cx.editor.next_app();
 }
 
 fn goto_previous_tab(cx: &mut Context) {
-    cx.editor.prev_tab();
+    use crate::ui::EditorApps;
+    cx.editor.prev_app();
 }
 
 fn extend_to_line_start(cx: &mut Context) {
@@ -1818,8 +1820,9 @@ fn global_search(cx: &mut Context) {
                 .boxed();
         }
 
-        let documents: Vec<_> = std::iter::once(editor.tabs[editor.active_tab].doc())
-            .map(|doc| (doc.path().cloned(), doc.text().to_owned()))
+        let documents: Vec<_> = editor.active_doc_view()
+            .into_iter()
+            .map(|dv| (dv.doc.path().cloned(), dv.doc.text().to_owned()))
             .collect();
 
         let matcher = match RegexMatcherBuilder::new()
@@ -2286,7 +2289,7 @@ fn file_explorer_in_current_directory(cx: &mut Context) {
 
 fn buffer_picker(cx: &mut Context) {
     struct TabMeta {
-        tab_index: usize,
+        app_index: usize,
         path: Option<PathBuf>,
         name: String,
         is_active: bool,
@@ -2296,20 +2299,17 @@ fn buffer_picker(cx: &mut Context) {
     cx.callback.push(Box::new(
         |editor: &mut Editor| {
             use crate::layers::EditorLayers;
-            use crate::ui::app::get_app;
             let mut items: Vec<TabMeta> = Vec::new();
             let active_index = editor.active_app;
             for i in 0..editor.apps.len() {
-                if let Some(app) = get_app(editor, i) {
-                    let name = app.name(editor);
-                    let path = app.icon_path(editor);
-                    items.push(TabMeta {
-                        tab_index: i,
-                        path,
-                        name,
-                        is_active: i == active_index,
-                    });
-                }
+                let name = editor.apps[i].name(editor);
+                let path = editor.apps[i].icon_path(editor);
+                items.push(TabMeta {
+                    app_index: i,
+                    path,
+                    name,
+                    is_active: i == active_index,
+                });
             }
 
             let columns = [
@@ -2322,12 +2322,12 @@ fn buffer_picker(cx: &mut Context) {
             ];
 
             let picker = Picker::new(columns, 1, items, (), move |cx, meta, _action| {
-                let tab_index = meta.tab_index;
+                let app_index = meta.app_index;
                 cx.jobs.callback(async move {
                     let callback = crate::job::Callback::Editor(Box::new(
                         move |editor| {
                             use crate::ui::EditorApps;
-                            editor.switch_app(tab_index);
+                            editor.switch_app(app_index);
                         },
                     ));
                     Ok(callback)
@@ -2352,19 +2352,18 @@ fn jumplist_picker(cx: &mut Context) {
     }
 
     {
-        let tab = &mut cx.editor.tabs[cx.editor.active_tab];
-        let (doc, tree) = tab.doc_and_tree_mut();
-        for (view, _) in tree.views_mut() {
-            view.sync_changes(doc);
+        if let Some(dv) = cx.editor.active_doc_view_mut() {
+            let (doc, tree) = dv.doc_and_tree_mut();
+            for (view, _) in tree.views_mut() {
+                view.sync_changes(doc);
+            }
         }
     }
 
     let new_meta = |view: &View, doc_id: AppId, selection: Selection| {
-        let doc = if cx.editor.tabs[cx.editor.active_tab].doc().id() == doc_id {
-            Some(cx.editor.tabs[cx.editor.active_tab].doc())
-        } else {
-            None
-        };
+        let doc = cx.editor.active_doc_view()
+            .filter(|dv| dv.doc.id() == doc_id)
+            .map(|dv| &dv.doc);
         let text = doc.map_or("".into(), |d| {
             selection
                 .fragments(d.text().slice(..))
@@ -2413,7 +2412,7 @@ fn jumplist_picker(cx: &mut Context) {
     let picker = Picker::new(
         columns,
         1, // path
-        cx.editor.tabs[cx.editor.active_tab].tree().views().flat_map(|(view, _)| {
+        cx.editor.active_doc_view().unwrap().tree.views().flat_map(|(view, _)| {
             view.jumps
                 .iter()
                 .rev()
@@ -2428,9 +2427,9 @@ fn jumplist_picker(cx: &mut Context) {
         },
     )
     .with_preview(|editor, meta| {
-        let doc = editor.tabs[editor.active_tab].doc();
-        if doc.id() == meta.id {
-            let line = meta.selection.primary().cursor_line(doc.text().slice(..));
+        let dv = editor.active_doc_view()?;
+        if dv.doc.id() == meta.id {
+            let line = meta.selection.primary().cursor_line(dv.doc.text().slice(..));
             Some((meta.id.into(), Some((line, line))))
         } else {
             None
@@ -2581,8 +2580,7 @@ pub fn command_palette(cx: &mut Context) {
             use crate::layers::EditorLayers;
             // Extract keymap from the active EditorView
             let keymap = {
-                use crate::ui::app::get_app;
-                let ev_keymaps = get_app(editor, editor.active_app)
+                let ev_keymaps = editor.apps.get(editor.active_app)
                     .and_then(|app| app.as_any().downcast_ref::<ui::EditorView>())
                     .map(|ev| ev.keymaps.map()[&editor.mode()].reverse_map());
                 match ev_keymaps {
@@ -2644,7 +2642,7 @@ pub fn command_palette(cx: &mut Context) {
 
                 command.execute(&mut ctx);
 
-                if ctx.editor.tabs[ctx.editor.active_tab].tree().contains(focus) {
+                if ctx.editor.active_doc_view().is_some_and(|dv| dv.tree.contains(focus)) {
                     let config = ctx.editor.config();
                     let (view, doc) = current!(ctx.editor);
                     view.ensure_cursor_in_view(doc, config.scrolloff);
@@ -2803,12 +2801,16 @@ fn select_mode(cx: &mut Context) {
     });
     doc.set_selection(view.id, selection);
 
-    cx.editor.tabs[cx.editor.active_tab].set_mode(Mode::Select);
+    if let Some(dv) = cx.editor.active_doc_view_mut() {
+        dv.mode = Mode::Select;
+    }
 }
 
 fn exit_select_mode(cx: &mut Context) {
     if cx.editor.mode() == Mode::Select {
-        cx.editor.tabs[cx.editor.active_tab].set_mode(Mode::Normal);
+        if let Some(dv) = cx.editor.active_doc_view_mut() {
+            dv.mode = Mode::Normal;
+        }
     }
 }
 
@@ -3260,12 +3262,12 @@ fn match_brackets(cx: &mut Context) {
 //
 
 fn jump_forward(cx: &mut Context) {
-    let focus = cx.editor.tabs[cx.editor.active_tab].tree().focus;
+    let focus = cx.editor.active_doc_view().unwrap().tree.focus;
     cx.editor.jump_forward(focus, cx.count());
 }
 
 fn jump_backward(cx: &mut Context) {
-    let focus = cx.editor.tabs[cx.editor.active_tab].tree().focus;
+    let focus = cx.editor.active_doc_view().unwrap().tree.focus;
     cx.editor.jump_backward(focus, cx.count());
 }
 
@@ -3334,7 +3336,7 @@ fn split(editor: &mut Editor, action: Action) {
         Action::HorizontalSplit => crate::view::tree::Layout::Horizontal,
         _ => crate::view::tree::Layout::Vertical,
     };
-    editor.tabs[editor.active_tab].tree_mut().split(new_view, layout);
+    editor.active_doc_view_mut().unwrap().tree.split(new_view, layout);
 
     // match the selection in the new view
     let (view, doc) = current!(editor);
@@ -3361,7 +3363,7 @@ fn vsplit_new(cx: &mut Context) {
 }
 
 fn wclose(cx: &mut Context) {
-    if cx.editor.tabs[cx.editor.active_tab].tree().views().count() == 1 {
+    if cx.editor.active_doc_view().unwrap().tree.views().count() == 1 {
         if let Err(err) = typed::buffers_remaining_impl(cx.editor) {
             cx.editor.set_error(err.to_string());
             return;
@@ -3381,8 +3383,9 @@ fn wclose(cx: &mut Context) {
 fn wonly(cx: &mut Context) {
     let views = cx
         .editor
-        .tabs[cx.editor.active_tab]
-        .tree()
+        .active_doc_view()
+        .unwrap()
+        .tree
         .views()
         .map(|(v, focus)| (v.id, focus))
         .collect::<Vec<_>>();

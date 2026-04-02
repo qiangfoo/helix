@@ -42,12 +42,12 @@ impl helix_event::AsyncHook for DocumentLinksHandler {
 
 /// Request document links for a specific document and cache them for navigation.
 fn request_document_links(editor: &mut Editor, doc_id: AppId) {
-    if editor.tabs[editor.active_tab].doc().id() != doc_id {
+    if editor.active_doc_view().is_none_or(|dv| dv.doc.id() != doc_id) {
         return;
     }
 
-    let cancel = editor.tabs[editor.active_tab].doc_mut().document_link_controller.restart();
-    let doc = editor.tabs[editor.active_tab].doc();
+    let cancel = editor.active_doc_view_mut().unwrap().doc.document_link_controller.restart();
+    let doc = &editor.active_doc_view().unwrap().doc;
 
     let mut seen_language_servers = HashSet::new();
     let mut futures: FuturesOrdered<_> = doc
@@ -110,10 +110,10 @@ fn request_document_links(editor: &mut Editor, doc_id: AppId) {
 }
 
 fn attach_document_links(editor: &mut Editor, doc_id: AppId, mut links: Vec<DocumentLink>) {
-    if editor.tabs[editor.active_tab].doc().id() != doc_id {
+    if editor.active_doc_view().is_none_or(|dv| dv.doc.id() != doc_id) {
         return;
     }
-    let doc = editor.tabs[editor.active_tab].doc_mut();
+    let doc = &mut editor.active_doc_view_mut().unwrap().doc;
 
     if links.is_empty() {
         doc.document_links.clear();
@@ -148,19 +148,23 @@ pub(super) fn register_hooks(handlers: &Handlers) {
     });
 
     register_hook!(move |event: &mut LanguageServerInitialized<'_>| {
-        let doc_id = event.editor.tabs[event.editor.active_tab].doc().id();
-        request_document_links(event.editor, doc_id);
+        if let Some(dv) = event.editor.active_doc_view() {
+            let doc_id = dv.doc.id();
+            request_document_links(event.editor, doc_id);
+        }
 
         Ok(())
     });
 
     register_hook!(move |event: &mut LanguageServerExited<'_>| {
-        if event.editor.tabs[event.editor.active_tab].doc().supports_language_server(event.server_id) {
-            event.editor.tabs[event.editor.active_tab].doc_mut().document_links.clear();
+        if event.editor.active_doc_view().is_some_and(|dv| dv.doc.supports_language_server(event.server_id)) {
+            event.editor.active_doc_view_mut().unwrap().doc.document_links.clear();
         }
 
-        let doc_id = event.editor.tabs[event.editor.active_tab].doc().id();
-        request_document_links(event.editor, doc_id);
+        if let Some(dv) = event.editor.active_doc_view() {
+            let doc_id = dv.doc.id();
+            request_document_links(event.editor, doc_id);
+        }
 
         Ok(())
     });

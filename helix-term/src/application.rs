@@ -208,9 +208,8 @@ impl Application {
         for doc in docs_to_open {
             editor.add_editor_app(doc);
         }
-        if editor.tab_count() > 0 {
+        if editor.app_count() > 0 {
             editor.switch_app(0);
-            editor.active_tab = 0;
         } else {
             // Ensure a welcome page if nothing was opened
             if editor.app_count() == 0 {
@@ -273,8 +272,8 @@ impl Application {
         self.editor.render_layers(area, surface, &mut self.jobs);
         let (pos, kind) = self.editor.layer_cursor(area);
         // reset cursor cache
-        if let Some(dv) = self.editor.tabs.get_mut(self.editor.active_tab) {
-            dv.cursor_cache().reset();
+        if let Some(dv) = self.editor.active_doc_view() {
+            dv.cursor_cache.reset();
         }
 
         let pos = pos.map(|pos| (pos.col as u16, pos.row as u16));
@@ -391,9 +390,11 @@ impl Application {
         // reset view position in case softwrap was enabled/disabled
         let scrolloff = self.editor.config().scrolloff;
         {
-            let (doc, tree) = self.editor.tabs[self.editor.active_tab].doc_and_tree_mut();
-            for (view, _) in tree.views() {
-                view.ensure_cursor_in_view(doc, scrolloff);
+            if let Some(dv) = self.editor.active_doc_view_mut() {
+                let (doc, tree) = dv.doc_and_tree_mut();
+                for (view, _) in tree.views() {
+                    view.ensure_cursor_in_view(doc, scrolloff);
+                }
             }
         }
     }
@@ -418,16 +419,19 @@ impl Application {
             // Re-parse the open document with the new language config.
             {
                 let lang_loader = self.editor.syn_loader.load();
-                let document = self.editor.tabs[self.editor.active_tab].doc_mut();
-                // Re-detect .editorconfig
-                document.detect_editor_config();
-                document.detect_language(&lang_loader);
-                let diagnostics = Editor::doc_diagnostics(
-                    &self.editor.language_servers,
-                    &self.editor.diagnostics,
-                    document,
-                );
-                document.replace_diagnostics(diagnostics, &[], None);
+                let app_id = self.editor.apps.get(self.editor.active_app).map(|a| a.id());
+                if let Some(dv) = app_id.and_then(|id| self.editor.doc_views.get_mut(&id)) {
+                    let document = &mut dv.doc;
+                    // Re-detect .editorconfig
+                    document.detect_editor_config();
+                    document.detect_language(&lang_loader);
+                    let diagnostics = Editor::doc_diagnostics(
+                        &self.editor.language_servers,
+                        &self.editor.diagnostics,
+                        document,
+                    );
+                    document.replace_diagnostics(diagnostics, &[], None);
+                }
             }
 
             self.terminal.reconfigure((&default_config.editor).into())?;
@@ -814,7 +818,9 @@ impl Application {
                         self.editor.diagnostics.retain(|_, diags| !diags.is_empty());
 
                         // Clear any diagnostics for the document with this server open.
-                        self.editor.tabs[self.editor.active_tab].doc_mut().clear_diagnostics_for_language_server(server_id);
+                        if let Some(dv) = self.editor.active_doc_view_mut() {
+                            dv.doc.clear_diagnostics_for_language_server(server_id);
+                        }
 
                         helix_event::dispatch(crate::view::events::LanguageServerExited {
                             editor: &mut self.editor,
@@ -973,8 +979,8 @@ impl Application {
                     Ok(MethodCall::WorkspaceDiagnosticRefresh) => {
                         let language_server = language_server!().id();
 
-                        if self.editor.tabs[self.editor.active_tab].doc().supports_language_server(language_server) {
-                            let doc_id = self.editor.tabs[self.editor.active_tab].doc().id();
+                        if self.editor.active_doc_view().is_some_and(|dv| dv.doc.supports_language_server(language_server)) {
+                            let doc_id = self.editor.active_doc_view().unwrap().doc.id();
                             handlers::diagnostics::request_document_diagnostics(
                                 &mut self.editor,
                                 doc_id,

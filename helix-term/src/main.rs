@@ -32,6 +32,25 @@ fn setup_logging(verbosity: u64) -> Result<()> {
     Ok(())
 }
 
+fn setup_panic_hook() {
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // Attempt to restore the terminal before printing the panic.
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(
+            std::io::stderr(),
+            crossterm::terminal::LeaveAlternateScreen,
+            crossterm::cursor::Show,
+        );
+
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        log::error!("PANIC: {info}\nBacktrace:\n{backtrace}");
+
+        // Also run the default hook (prints to stderr)
+        hook(info);
+    }));
+}
+
 fn main() -> Result<()> {
     let exit_code = main_impl()?;
     std::process::exit(exit_code);
@@ -115,6 +134,7 @@ FLAGS:
     }
 
     setup_logging(args.verbosity).context("failed to initialize logging")?;
+    setup_panic_hook();
 
     // NOTE: Set the working directory early so the correct configuration is loaded. Be aware that
     // Application::new() depends on this logic so it must be updated if this changes.

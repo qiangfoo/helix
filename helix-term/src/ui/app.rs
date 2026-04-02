@@ -55,29 +55,6 @@ pub trait Application: Any {
 }
 
 // ---------------------------------------------------------------------------
-// Typed helpers for accessing editor.apps (Vec<Box<dyn Any>>)
-// Each element is a Box<Box<dyn Application>> erased to Box<dyn Any>.
-// ---------------------------------------------------------------------------
-
-type AppBox = Box<dyn Application>;
-
-pub fn get_app(editor: &Editor, idx: usize) -> Option<&dyn Application> {
-    editor.apps.get(idx)?.downcast_ref::<AppBox>().map(|b| &**b)
-}
-
-pub fn get_app_mut(editor: &mut Editor, idx: usize) -> Option<&mut dyn Application> {
-    editor
-        .apps
-        .get_mut(idx)?
-        .downcast_mut::<AppBox>()
-        .map(|b| &mut **b)
-}
-
-fn push_app(editor: &mut Editor, app: Box<dyn Application>) {
-    editor.apps.push(Box::new(app));
-}
-
-// ---------------------------------------------------------------------------
 // EditorApps — extension trait on Editor for application management
 // ---------------------------------------------------------------------------
 
@@ -116,22 +93,21 @@ impl EditorApps for Editor {
     }
 
     fn app_names(&self) -> Vec<String> {
-        (0..self.apps.len())
-            .filter_map(|i| get_app(self, i).map(|a| a.name(self)))
-            .collect()
+        self.apps.iter().map(|a| a.name(self)).collect()
     }
 
     fn add_app(&mut self, app: Box<dyn Application>) {
         // Remove welcome tab before adding a real tab
         if self.apps.len() == 1 {
-            if get_app(self, 0)
-                .and_then(|a| a.as_any().downcast_ref::<super::welcome::WelcomePage>())
+            if self.apps[0]
+                .as_any()
+                .downcast_ref::<super::welcome::WelcomePage>()
                 .is_some()
             {
                 self.apps.remove(0);
             }
         }
-        push_app(self, app);
+        self.apps.push(app);
         self.active_app = self.apps.len() - 1;
     }
 
@@ -139,28 +115,23 @@ impl EditorApps for Editor {
         use super::diff_view::{DiffKey, DiffView};
         use crate::view::handlers::FileWatcherCommand;
 
-        // Extract info we need before mutating, to avoid borrow conflicts
-        let (worktree_to_unwatch, editor_tab_index) = {
-            if index >= self.apps.len() {
-                return;
-            }
-            let app = match get_app(self, index) {
-                Some(a) => a,
-                None => return,
-            };
-            let worktree = app
-                .as_any()
-                .downcast_ref::<DiffView>()
-                .and_then(|dv| match dv.diff_key() {
-                    DiffKey::LocalChanges => Some(dv.cwd().to_path_buf()),
-                    _ => None,
-                });
-            let tab_idx = app
-                .as_any()
-                .downcast_ref::<super::EditorView>()
-                .map(|ev| ev.tab_index);
-            (worktree, tab_idx)
-        };
+        if index >= self.apps.len() {
+            return;
+        }
+
+        // Extract info before mutating
+        let app_id = self.apps[index].id();
+        let worktree_to_unwatch = self.apps[index]
+            .as_any()
+            .downcast_ref::<DiffView>()
+            .and_then(|dv| match dv.diff_key() {
+                DiffKey::LocalChanges => Some(dv.cwd().to_path_buf()),
+                _ => None,
+            });
+        let is_editor_view = self.apps[index]
+            .as_any()
+            .downcast_ref::<super::EditorView>()
+            .is_some();
 
         // Unwatch worktree for LocalChanges DiffView tabs
         if let Some(worktree) = worktree_to_unwatch {
@@ -170,30 +141,15 @@ impl EditorApps for Editor {
             );
         }
 
-        // If the tab being closed is an EditorView, remove its backing DocView
-        if let Some(tab_index) = editor_tab_index {
-            if tab_index < self.tabs.len() {
-                self.tabs.remove(tab_index);
-                // Fix up tab_index on remaining EditorViews
-                for app_any in &mut self.apps {
-                    if let Some(app) = app_any.downcast_mut::<AppBox>() {
-                        if let Some(ev) = app.as_any_mut().downcast_mut::<super::EditorView>() {
-                            if ev.tab_index > tab_index {
-                                ev.tab_index -= 1;
-                            }
-                        }
-                    }
-                }
-                if self.active_tab >= self.tabs.len() && !self.tabs.is_empty() {
-                    self.active_tab = self.tabs.len() - 1;
-                }
-            }
+        // Remove the app's DocView if it's an EditorView
+        if is_editor_view {
+            self.doc_views.remove(&app_id);
         }
 
         self.apps.remove(index);
 
         if self.apps.is_empty() {
-            push_app(self, Box::new(super::welcome::WelcomePage::new()));
+            self.apps.push(Box::new(super::welcome::WelcomePage::new()));
             self.active_app = 0;
             return;
         }
@@ -201,13 +157,6 @@ impl EditorApps for Editor {
             self.active_app = self.apps.len() - 1;
         } else if self.active_app > index {
             self.active_app -= 1;
-        }
-
-        // Sync editor.active_tab to the current active EditorView
-        if let Some(ev) = get_app(self, self.active_app)
-            .and_then(|a| a.as_any().downcast_ref::<super::EditorView>())
-        {
-            self.active_tab = ev.tab_index;
         }
     }
 
@@ -236,12 +185,6 @@ impl EditorApps for Editor {
     fn next_app(&mut self) {
         if !self.apps.is_empty() {
             self.active_app = (self.active_app + 1) % self.apps.len();
-            // Sync editor.active_tab
-            if let Some(ev) = get_app(self, self.active_app)
-                .and_then(|a| a.as_any().downcast_ref::<super::EditorView>())
-            {
-                self.active_tab = ev.tab_index;
-            }
         }
     }
 
@@ -252,46 +195,27 @@ impl EditorApps for Editor {
             } else {
                 self.active_app - 1
             };
-            if let Some(ev) = get_app(self, self.active_app)
-                .and_then(|a| a.as_any().downcast_ref::<super::EditorView>())
-            {
-                self.active_tab = ev.tab_index;
-            }
         }
     }
 
     fn switch_app(&mut self, index: usize) {
         if index < self.apps.len() {
             self.active_app = index;
-            if let Some(ev) = get_app(self, self.active_app)
-                .and_then(|a| a.as_any().downcast_ref::<super::EditorView>())
-            {
-                self.active_tab = ev.tab_index;
-            }
         }
     }
 
     fn add_editor_app(&mut self, doc: crate::view::Document) {
         // If the file is already open in an existing tab, activate it instead.
         if let Some(new_path) = doc.path().and_then(|p| std::fs::canonicalize(p).ok()) {
-            for (i, tab) in self.tabs.iter().enumerate() {
-                if let Some(existing) =
-                    tab.doc().path().and_then(|p| std::fs::canonicalize(p).ok())
-                {
-                    if existing == new_path {
-                        self.activate_tab(i);
-                        // Find the corresponding app and switch to it
-                        for j in 0..self.apps.len() {
-                            if let Some(ev) = get_app(self, j)
-                                .and_then(|a| a.as_any().downcast_ref::<super::EditorView>())
-                            {
-                                if ev.tab_index == i {
-                                    self.active_app = j;
-                                    break;
-                                }
+            for (i, app) in self.apps.iter().enumerate() {
+                if let Some(ev) = app.as_any().downcast_ref::<super::EditorView>() {
+                    if let Some(dv) = self.doc_views.get(&ev.id()) {
+                        if let Some(existing) = dv.doc.path().and_then(|p| std::fs::canonicalize(p).ok()) {
+                            if existing == new_path {
+                                self.active_app = i;
+                                return;
                             }
                         }
-                        return;
                     }
                 }
             }
@@ -299,10 +223,10 @@ impl EditorApps for Editor {
 
         let keymaps = self.make_keymaps();
         let dv = crate::view::DocView::new(doc);
-        let tab_index = self.add_tab(Box::new(dv));
-        let editor_view = Box::new(super::EditorView::new(keymaps, tab_index));
-        self.add_app(editor_view);
-        self.active_tab = tab_index;
+        let editor_view = super::EditorView::new(keymaps);
+        let app_id = editor_view.id();
+        self.add_doc_view(app_id, dv);
+        self.add_app(Box::new(editor_view));
     }
 
     fn add_diff_app(&mut self, diff_view: super::diff_view::DiffView) {
@@ -319,10 +243,8 @@ impl EditorApps for Editor {
         }
 
         // Check for existing DiffView with same key
-        for i in 0..self.apps.len() {
-            if let Some(existing) = get_app(self, i)
-                .and_then(|a| a.as_any().downcast_ref::<super::diff_view::DiffView>())
-            {
+        for (i, app) in self.apps.iter().enumerate() {
+            if let Some(existing) = app.as_any().downcast_ref::<super::diff_view::DiffView>() {
                 if existing.diff_key() == diff_view.diff_key() {
                     self.active_app = i;
                     return;

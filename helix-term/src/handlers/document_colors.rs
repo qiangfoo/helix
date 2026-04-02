@@ -46,12 +46,12 @@ fn request_document_colors(editor: &mut Editor, doc_id: AppId) {
         return;
     }
 
-    if editor.tabs[editor.active_tab].doc().id() != doc_id {
+    if editor.active_doc_view().is_none_or(|dv| dv.doc.id() != doc_id) {
         return;
     }
 
-    let cancel = editor.tabs[editor.active_tab].doc_mut().color_swatch_controller.restart();
-    let doc = editor.tabs[editor.active_tab].doc();
+    let cancel = editor.active_doc_view_mut().unwrap().doc.color_swatch_controller.restart();
+    let doc = &editor.active_doc_view().unwrap().doc;
 
     let mut seen_language_servers = HashSet::new();
     let mut futures: FuturesOrdered<_> = doc
@@ -110,10 +110,10 @@ fn attach_document_colors(
         return;
     }
 
-    if editor.tabs[editor.active_tab].doc().id() != doc_id {
+    if editor.active_doc_view().is_none_or(|dv| dv.doc.id() != doc_id) {
         return;
     }
-    let doc = editor.tabs[editor.active_tab].doc_mut();
+    let doc = &mut editor.active_doc_view_mut().unwrap().doc;
 
     if doc_colors.is_empty() {
         doc.color_swatches.take();
@@ -186,20 +186,24 @@ pub(super) fn register_hooks(handlers: &Handlers) {
     });
 
     register_hook!(move |event: &mut LanguageServerInitialized<'_>| {
-        let doc_id = event.editor.tabs[event.editor.active_tab].doc().id();
-        request_document_colors(event.editor, doc_id);
+        if let Some(dv) = event.editor.active_doc_view() {
+            let doc_id = dv.doc.id();
+            request_document_colors(event.editor, doc_id);
+        }
 
         Ok(())
     });
 
     register_hook!(move |event: &mut LanguageServerExited<'_>| {
         // Clear and re-request color swatches when a server exits.
-        if event.editor.tabs[event.editor.active_tab].doc().supports_language_server(event.server_id) {
-            event.editor.tabs[event.editor.active_tab].doc_mut().color_swatches.take();
+        if event.editor.active_doc_view().is_some_and(|dv| dv.doc.supports_language_server(event.server_id)) {
+            event.editor.active_doc_view_mut().unwrap().doc.color_swatches.take();
         }
 
-        let doc_id = event.editor.tabs[event.editor.active_tab].doc().id();
-        request_document_colors(event.editor, doc_id);
+        if let Some(dv) = event.editor.active_doc_view() {
+            let doc_id = dv.doc.id();
+            request_document_colors(event.editor, doc_id);
+        }
 
         Ok(())
     });

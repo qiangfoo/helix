@@ -9,6 +9,7 @@ All buffers are read-only. Write/save commands, force-quit variants, undo/redo, 
 - Use `gix` (gitoxide) whenever possible to interact with git instead of running git commands. The `helix-vcs` crate already depends on `gix`.
 - The release binary must compile with **zero warnings**. After any code changes, check for and resolve unused imports, dead code, and unused variables before committing. Use `HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1 cargo build --release` to verify.
 - At the end of each task, make sure all the test failures are resolved. Run `HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1 cargo test -p helix-term --features integration --test integration` to verify.
+- Use the `log` crate (`log::error!`, `log::warn!`, `log::info!`, `log::debug!`) for all logging. The backend is `fern`, configured in `main.rs`. Never use `println!`, `eprintln!`, or manual file writes for diagnostics — they bypass the log file at `~/.cache/helix/helix.log`. Panics are captured by a hook in `main.rs` and logged via `log::error!`.
 
 # Ratatui Architecture Best Practices
 

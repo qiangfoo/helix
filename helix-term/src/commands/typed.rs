@@ -704,8 +704,9 @@ fn reload_all(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> 
         }
 
         {
-            let tab = &mut cx.editor.tabs[cx.editor.active_tab];
-            let (doc, tree) = tab.doc_and_tree_mut();
+            let app_id = cx.editor.apps[cx.editor.active_app].id();
+            let dv = cx.editor.doc_views.get_mut(&app_id).unwrap();
+            let (doc, tree) = dv.doc_and_tree_mut();
             let view = tree.get_mut(view_ids[0]);
             view.sync_changes(doc);
 
@@ -716,7 +717,7 @@ fn reload_all(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> 
             }
         }
 
-        if let Some(path) = cx.editor.tabs[cx.editor.active_tab].doc().path() {
+        if let Some(path) = cx.editor.active_doc_view().unwrap().doc.path() {
             cx.editor
                 .language_servers
                 .file_event_handler
@@ -724,8 +725,8 @@ fn reload_all(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> 
         }
 
         for vid in view_ids {
-            let tab = &mut cx.editor.tabs[cx.editor.active_tab];
-            let (doc, tree) = tab.doc_and_tree_mut();
+            let dv = cx.editor.active_doc_view_mut().unwrap();
+            let (doc, tree) = dv.doc_and_tree_mut();
             let view = tree.get_mut(vid);
             view.ensure_cursor_in_view(doc, scrolloff);
         }
@@ -890,16 +891,18 @@ fn lsp_restart(cx: &mut compositor::Context, args: Args, event: PromptEvent) -> 
     }
 
     // Refresh language servers for the single document if applicable.
-    let should_refresh = cx.editor.tabs[cx.editor.active_tab].doc().language_config().map_or(false, |config| {
-        config.language_servers.iter().any(|ls| {
-            language_servers
-                .iter()
-                .any(|restarted_ls| restarted_ls == &ls.name)
+    let should_refresh = cx.editor.active_doc_view().is_some_and(|dv| {
+        dv.doc.language_config().map_or(false, |config| {
+            config.language_servers.iter().any(|ls| {
+                language_servers
+                    .iter()
+                    .any(|restarted_ls| restarted_ls == &ls.name)
+            })
         })
     });
 
     if should_refresh {
-        let doc_id = cx.editor.tabs[cx.editor.active_tab].doc().id();
+        let doc_id = cx.editor.active_doc_view().unwrap().doc.id();
         cx.editor.refresh_language_servers(doc_id);
     }
 
@@ -940,7 +943,7 @@ fn lsp_stop(cx: &mut compositor::Context, args: Args, event: PromptEvent) -> any
     for ls_name in &language_servers {
         cx.editor.language_servers.stop(ls_name);
 
-        let doc = cx.editor.tabs[cx.editor.active_tab].doc_mut();
+        let doc = &mut cx.editor.active_doc_view_mut().unwrap().doc;
         if let Some(client) = doc.remove_language_server_by_name(ls_name) {
             doc.clear_diagnostics_for_language_server(client.id());
             doc.reset_all_inlay_hints();
@@ -1201,8 +1204,9 @@ fn tutor(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> anyho
 }
 
 fn abort_goto_line_number_preview(cx: &mut compositor::Context) {
-    if let Some(last_selection) = cx.editor.tabs[cx.editor.active_tab].last_selection().clone() {
-        cx.editor.tabs[cx.editor.active_tab].set_last_selection(None);
+    let last_sel = cx.editor.active_doc_view().and_then(|dv| dv.last_selection.clone());
+    if let Some(last_selection) = last_sel {
+        cx.editor.active_doc_view_mut().unwrap().last_selection = None;
         let scrolloff = cx.editor.config().scrolloff;
 
         let (view, doc) = current!(cx.editor);
@@ -1212,10 +1216,10 @@ fn abort_goto_line_number_preview(cx: &mut compositor::Context) {
 }
 
 fn update_goto_line_number_preview(cx: &mut compositor::Context, args: Args) -> anyhow::Result<()> {
-    if cx.editor.tabs[cx.editor.active_tab].last_selection().is_none() {
+    if cx.editor.active_doc_view().is_some_and(|dv| dv.last_selection.is_none()) {
         let (view, doc) = current!(cx.editor);
         let sel = doc.selection(view.id).clone();
-        cx.editor.tabs[cx.editor.active_tab].set_last_selection(Some(sel));
+        cx.editor.active_doc_view_mut().unwrap().last_selection = Some(sel);
     }
 
     let scrolloff = cx.editor.config().scrolloff;
@@ -1251,11 +1255,10 @@ pub(super) fn goto_line_number(
 
             let last_selection = cx
                 .editor
-                .tabs[cx.editor.active_tab]
-                .last_selection()
-                .clone()
+                .active_doc_view()
+                .and_then(|dv| dv.last_selection.clone())
                 .expect("update_goto_line_number_preview should always set last_selection");
-            cx.editor.tabs[cx.editor.active_tab].set_last_selection(None);
+            cx.editor.active_doc_view_mut().unwrap().last_selection = None;
 
             let (view, doc) = current!(cx.editor);
             view.jumps.push((doc.id(), last_selection));

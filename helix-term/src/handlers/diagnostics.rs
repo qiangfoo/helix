@@ -25,15 +25,19 @@ use crate::job;
 pub(super) fn register_hooks(handlers: &Handlers) {
     register_hook!(move |event: &mut DiagnosticsDidChange<'_>| {
         if event.editor.mode() != Mode::Normal {
-            for (view, _) in event.editor.tabs[event.editor.active_tab].tree_mut().views_mut() {
-                send_blocking(&view.diagnostics_handler.events, DiagnosticEvent::Refresh)
+            if let Some(dv) = event.editor.active_doc_view_mut() {
+                for (view, _) in dv.tree.views_mut() {
+                    send_blocking(&view.diagnostics_handler.events, DiagnosticEvent::Refresh)
+                }
             }
         }
         Ok(())
     });
     register_hook!(move |event: &mut OnModeSwitch<'_, '_>| {
-        for (view, _) in event.cx.editor.tabs[event.cx.editor.active_tab].tree_mut().views_mut() {
-            view.diagnostics_handler.active = event.new_mode != Mode::Normal;
+        if let Some(dv) = event.cx.editor.active_doc_view_mut() {
+            for (view, _) in dv.tree.views_mut() {
+                view.diagnostics_handler.active = event.new_mode != Mode::Normal;
+            }
         }
         Ok(())
     });
@@ -89,8 +93,10 @@ pub(super) fn register_hooks(handlers: &Handlers) {
     });
 
     register_hook!(move |event: &mut LanguageServerInitialized<'_>| {
-        let doc_id = event.editor.tabs[event.editor.active_tab].doc().id();
-        request_document_diagnostics(event.editor, doc_id);
+        if let Some(dv) = event.editor.active_doc_view() {
+            let doc_id = dv.doc.id();
+            request_document_diagnostics(event.editor, doc_id);
+        }
 
         Ok(())
     });
@@ -143,7 +149,8 @@ impl helix_event::AsyncHook for PullAllDocumentsDiagnosticHandler {
     fn finish_debounce(&mut self) {
         let language_servers = mem::take(&mut self.language_servers);
         job::dispatch_blocking(move |editor| {
-            let doc_id = editor.tabs[editor.active_tab].doc().id();
+            let Some(dv) = editor.active_doc_view() else { return };
+            let doc_id = dv.doc.id();
             request_document_diagnostics_for_language_severs(
                 editor,
                 doc_id,
@@ -158,12 +165,12 @@ fn request_document_diagnostics_for_language_severs(
     doc_id: AppId,
     language_servers: HashSet<LanguageServerId>,
 ) {
-    if editor.tabs[editor.active_tab].doc().id() != doc_id {
+    if editor.active_doc_view().is_none_or(|dv| dv.doc.id() != doc_id) {
         return;
     }
 
-    let cancel = editor.tabs[editor.active_tab].doc_mut().pull_diagnostic_controller.restart();
-    let doc = editor.tabs[editor.active_tab].doc();
+    let cancel = editor.active_doc_view_mut().unwrap().doc.pull_diagnostic_controller.restart();
+    let doc = &editor.active_doc_view().unwrap().doc;
 
     let mut futures: FuturesUnordered<_> = language_servers
         .iter()
@@ -250,11 +257,11 @@ fn request_document_diagnostics_for_language_severs(
 }
 
 pub fn request_document_diagnostics(editor: &mut Editor, doc_id: AppId) {
-    if editor.tabs[editor.active_tab].doc().id() != doc_id {
+    if editor.active_doc_view().is_none_or(|dv| dv.doc.id() != doc_id) {
         return;
     }
 
-    let language_servers = editor.tabs[editor.active_tab].doc()
+    let language_servers = editor.active_doc_view().unwrap().doc
         .language_servers_with_feature(LanguageServerFeature::PullDiagnostics)
         .map(|language_servers| language_servers.id())
         .collect();
@@ -287,8 +294,8 @@ fn handle_pull_diagnostics_response(
                 }
             };
 
-            if editor.tabs[editor.active_tab].doc().id() == document_id {
-                editor.tabs[editor.active_tab].doc_mut().previous_diagnostic_id = result_id;
+            if editor.active_doc_view().is_some_and(|dv| dv.doc.id() == document_id) {
+                editor.active_doc_view_mut().unwrap().doc.previous_diagnostic_id = result_id;
             };
         }
         lsp::DocumentDiagnosticReportResult::Partial(_) => {}

@@ -285,7 +285,7 @@ pub fn syntax_workspace_symbol_picker(cx: &mut Context) {
             Err(err) => return async { Err(anyhow::anyhow!(err)) }.boxed(),
         };
         let loader = editor.syn_loader.load();
-        for doc in std::iter::once(editor.tabs[editor.active_tab].doc()) {
+        for doc in editor.active_doc_view().into_iter().map(|dv| &dv.doc) {
             let Some(syntax) = doc.syntax() else { continue };
             let text = doc.text().slice(..);
             let uri_or_id = doc
@@ -319,7 +319,7 @@ pub fn syntax_workspace_symbol_picker(cx: &mut Context) {
         let pattern = Arc::new(pattern);
         let injector = injector.clone();
         let loader = editor.syn_loader.load();
-        let documents: HashSet<_> = std::iter::once(editor.tabs[editor.active_tab].doc())
+        let documents: HashSet<_> = editor.active_doc_view().into_iter().map(|dv| &dv.doc)
             .filter_map(Document::path)
             .cloned()
             .collect();
@@ -407,11 +407,13 @@ pub fn syntax_workspace_symbol_picker(cx: &mut Context) {
                     cx.editor.syn_loader.clone(),
                 ) {
                     Ok(mut doc) => {
-                        let view_id = cx.editor.tabs[cx.editor.active_tab].tree().focus;
-                        let view_id = cx.editor.tabs[cx.editor.active_tab].tree().get(view_id).id;
+                        let dv = cx.editor.active_doc_view().unwrap();
+                        let view_id = dv.tree.get(dv.tree.focus).id;
                         doc.ensure_view_init(view_id);
-                        *cx.editor.tabs[cx.editor.active_tab].doc_mut() = doc;
-                        cx.editor.launch_language_servers(cx.editor.tabs[cx.editor.active_tab].doc().id());
+                        let dv = cx.editor.active_doc_view_mut().unwrap();
+                        dv.doc = doc;
+                        let doc_id = dv.doc.id();
+                        cx.editor.launch_language_servers(doc_id);
                     }
                     Err(e) => {
                         cx.editor

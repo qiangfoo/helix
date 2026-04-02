@@ -17,10 +17,10 @@ fn request_document_highlights(editor: &mut Editor, doc_id: AppId, view_id: View
         return;
     }
 
-    if editor.tabs[editor.active_tab].doc().id() != doc_id {
+    if editor.active_doc_view().is_none_or(|dv| dv.doc.id() != doc_id) {
         return;
     }
-    let doc = editor.tabs[editor.active_tab].doc_mut();
+    let doc = &mut editor.active_doc_view_mut().unwrap().doc;
 
     doc.ensure_view_init(view_id);
 
@@ -110,10 +110,10 @@ fn apply_document_highlights(
         return;
     }
 
-    if editor.tabs[editor.active_tab].doc().id() != doc_id {
+    if editor.active_doc_view().is_none_or(|dv| dv.doc.id() != doc_id) {
         return;
     }
-    let doc = editor.tabs[editor.active_tab].doc_mut();
+    let doc = &mut editor.active_doc_view_mut().unwrap().doc;
 
     if !doc.has_language_server_with_feature(LanguageServerFeature::DocumentHighlight) {
         doc.clear_document_highlights(view_id);
@@ -144,11 +144,12 @@ pub(super) fn register_hooks(_handlers: &Handlers) {
         if !event.editor.config().lsp.auto_document_highlight {
             return Ok(());
         }
-        let view_id = event.editor.tabs[event.editor.active_tab].tree().focus;
-        if event.editor.tabs[event.editor.active_tab].tree().try_get(view_id).is_none() {
-            return Ok(());
+        if let Some(dv) = event.editor.active_doc_view() {
+            let view_id = dv.tree.focus;
+            if dv.tree.try_get(view_id).is_some() {
+                request_document_highlights(event.editor, event.doc, view_id);
+            }
         }
-        request_document_highlights(event.editor, event.doc, view_id);
         Ok(())
     });
 
@@ -167,8 +168,11 @@ pub(super) fn register_hooks(_handlers: &Handlers) {
         if !event.editor.config().lsp.auto_document_highlight {
             return Ok(());
         }
-        let view_id = event.editor.tabs[event.editor.active_tab].tree().focus;
-        let Some(view) = event.editor.tabs[event.editor.active_tab].tree().try_get(view_id) else {
+        let Some(dv) = event.editor.active_doc_view() else {
+            return Ok(());
+        };
+        let view_id = dv.tree.focus;
+        let Some(view) = dv.tree.try_get(view_id) else {
             return Ok(());
         };
         let doc_id = view.doc;
@@ -177,8 +181,8 @@ pub(super) fn register_hooks(_handlers: &Handlers) {
     });
 
     register_hook!(move |event: &mut LanguageServerExited<'_>| {
-        if event.editor.tabs[event.editor.active_tab].doc().supports_language_server(event.server_id) {
-            event.editor.tabs[event.editor.active_tab].doc_mut().clear_all_document_highlights();
+        if event.editor.active_doc_view().is_some_and(|dv| dv.doc.supports_language_server(event.server_id)) {
+            event.editor.active_doc_view_mut().unwrap().doc.clear_all_document_highlights();
         }
         Ok(())
     });
@@ -187,7 +191,9 @@ pub(super) fn register_hooks(_handlers: &Handlers) {
         if event.new.lsp.auto_document_highlight {
             return Ok(());
         }
-        event.editor.tabs[event.editor.active_tab].doc_mut().clear_all_document_highlights();
+        if let Some(dv) = event.editor.active_doc_view_mut() {
+            dv.doc.clear_all_document_highlights();
+        }
         Ok(())
     });
 }

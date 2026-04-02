@@ -12,7 +12,9 @@
 #[macro_export]
 macro_rules! current {
     ($editor:expr) => {{
-        let (doc, tree) = $editor.tabs[$editor.active_tab].doc_and_tree_mut();
+        let id = $editor.apps[$editor.active_app].id();
+        let dv = $editor.doc_views.get_mut(&id).expect("no active doc view");
+        let (doc, tree) = dv.doc_and_tree_mut();
         let view = tree.get_mut(tree.focus);
         (view, doc)
     }};
@@ -21,10 +23,11 @@ macro_rules! current {
 #[macro_export]
 macro_rules! current_ref {
     ($editor:expr) => {{
-        let tab = &$editor.tabs[$editor.active_tab];
-        let tree = tab.tree();
+        let id = $editor.apps[$editor.active_app].id();
+        let dv = $editor.doc_views.get(&id).expect("no active doc view");
+        let tree = &dv.tree;
         let view = tree.get(tree.focus);
-        let doc = tab.doc();
+        let doc = &dv.doc;
         (view, doc)
     }};
 }
@@ -34,7 +37,8 @@ macro_rules! current_ref {
 #[macro_export]
 macro_rules! doc_mut {
     ($editor:expr) => {{
-        $editor.tabs[$editor.active_tab].doc_mut()
+        let id = $editor.apps[$editor.active_app].id();
+        &mut $editor.doc_views.get_mut(&id).expect("no active doc view").doc
     }};
 }
 
@@ -43,12 +47,14 @@ macro_rules! doc_mut {
 #[macro_export]
 macro_rules! view_mut {
     ($editor:expr, $id:expr) => {{
-        $editor.tabs[$editor.active_tab].tree_mut().get_mut($id)
+        let id = $editor.apps[$editor.active_app].id();
+        $editor.doc_views.get_mut(&id).expect("no active doc view").tree.get_mut($id)
     }};
     ($editor:expr) => {{
-        let tab = &mut $editor.tabs[$editor.active_tab];
-        let focus = tab.tree().focus;
-        tab.tree_mut().get_mut(focus)
+        let id = $editor.apps[$editor.active_app].id();
+        let dv = $editor.doc_views.get_mut(&id).expect("no active doc view");
+        let focus = dv.tree.focus;
+        dv.tree.get_mut(focus)
     }};
 }
 
@@ -57,11 +63,13 @@ macro_rules! view_mut {
 #[macro_export]
 macro_rules! view {
     ($editor:expr, $id:expr) => {{
-        $editor.tabs[$editor.active_tab].tree().get($id)
+        let id = $editor.apps[$editor.active_app].id();
+        $editor.doc_views.get(&id).expect("no active doc view").tree.get($id)
     }};
     ($editor:expr) => {{
-        let tab = &$editor.tabs[$editor.active_tab];
-        let tree = tab.tree();
+        let id = $editor.apps[$editor.active_app].id();
+        let dv = $editor.doc_views.get(&id).expect("no active doc view");
+        let tree = &dv.tree;
         tree.get(tree.focus)
     }};
 }
@@ -69,6 +77,7 @@ macro_rules! view {
 #[macro_export]
 macro_rules! doc {
     ($editor:expr) => {{
-        $editor.tabs[$editor.active_tab].doc()
+        let id = $editor.apps[$editor.active_app].id();
+        &$editor.doc_views.get(&id).expect("no active doc view").doc
     }};
 }

@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use helix_term::application::Application;
+use helix_term::ui::EditorApps;
 use helix_term::view::input::parse_macro;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
@@ -9,7 +10,7 @@ use crossterm::event::{Event, KeyEvent};
 use super::*;
 
 /// A lightweight helper that sends keys and runs an assertion without
-/// calling `current_ref!` — safe to use when `editor.tabs` may be empty
+/// calling `current_ref!` — safe to use when `editor.doc_views` may be empty
 /// (e.g. welcome-tab state).
 async fn test_tab_key_sequence(
     app: &mut Application,
@@ -67,8 +68,8 @@ async fn test_open_file_creates_tab() -> anyhow::Result<()> {
             app,
             None,
             Some(&|app| {
-                assert_eq!(1, app.editor.tab_count());
-                assert_eq!(0, app.editor.active_tab);
+                assert_eq!(1, app.editor.app_count());
+                assert_eq!(0, app.editor.active_app);
             }),
         )
         .await?;
@@ -81,10 +82,10 @@ async fn test_open_file_creates_tab() -> anyhow::Result<()> {
             Some(&|app| {
                 assert_eq!(
                     2,
-                    app.editor.tab_count(),
+                    app.editor.app_count(),
                     "should have 2 tabs after opening a second file"
                 );
-                assert_eq!(1, app.editor.active_tab, "newly opened tab should be active");
+                assert_eq!(1, app.editor.active_app, "newly opened tab should be active");
             }),
         )
         .await?;
@@ -107,10 +108,10 @@ async fn test_open_same_file_activates_existing_tab() -> anyhow::Result<()> {
             Some(&|app| {
                 assert_eq!(
                     1,
-                    app.editor.tab_count(),
+                    app.editor.app_count(),
                     "opening the same file should not create a duplicate tab"
                 );
-                assert_eq!(0, app.editor.active_tab);
+                assert_eq!(0, app.editor.active_app);
             }),
         )
         .await?;
@@ -132,7 +133,7 @@ async fn test_close_tab() -> anyhow::Result<()> {
             app,
             Some(&open_cmd),
             Some(&|app| {
-                assert_eq!(2, app.editor.tab_count());
+                assert_eq!(2, app.editor.app_count());
             }),
         )
         .await?;
@@ -142,7 +143,7 @@ async fn test_close_tab() -> anyhow::Result<()> {
             app,
             Some(":tab-close<ret>"),
             Some(&|app| {
-                assert_eq!(1, app.editor.tab_count(), "should have 1 tab after closing");
+                assert_eq!(1, app.editor.app_count(), "should have 1 tab after closing");
             }),
         )
         .await?;
@@ -162,7 +163,7 @@ async fn test_close_last_tab_shows_welcome() -> anyhow::Result<()> {
             app,
             None,
             Some(&|app| {
-                assert_eq!(1, app.editor.tab_count());
+                assert_eq!(1, app.editor.app_count());
             }),
         )
         .await?;
@@ -172,11 +173,14 @@ async fn test_close_last_tab_shows_welcome() -> anyhow::Result<()> {
             app,
             Some(":tab-close<ret>"),
             Some(&|app| {
+                // After closing the last editor tab, a welcome page is added,
+                // so app_count is 1 but doc_views should be empty.
                 assert_eq!(
                     0,
-                    app.editor.tab_count(),
-                    "after closing last tab, editor should have 0 tabs (welcome page showing)"
+                    app.editor.doc_views.len(),
+                    "after closing last tab, editor should have 0 doc views (welcome page showing)"
                 );
+                assert_eq!(1, app.editor.app_count(), "welcome page should be the only app");
             }),
         )
         .await?;
@@ -198,7 +202,7 @@ async fn test_welcome_tab_after_close_all() -> anyhow::Result<()> {
             app,
             Some(&open_cmd),
             Some(&|app| {
-                assert_eq!(2, app.editor.tab_count());
+                assert_eq!(2, app.editor.app_count());
             }),
         )
         .await?;
@@ -208,11 +212,14 @@ async fn test_welcome_tab_after_close_all() -> anyhow::Result<()> {
             app,
             Some(":tab-close-all<ret>"),
             Some(&|app| {
+                // After tab-close-all, a welcome page is added,
+                // so app_count is 1 but doc_views should be empty.
                 assert_eq!(
                     0,
-                    app.editor.tab_count(),
-                    "after tab-close-all, editor should have 0 tabs (welcome page showing)"
+                    app.editor.doc_views.len(),
+                    "after tab-close-all, editor should have 0 doc views (welcome page showing)"
                 );
+                assert_eq!(1, app.editor.app_count(), "welcome page should be the only app");
             }),
         )
         .await?;

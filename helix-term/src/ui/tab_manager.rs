@@ -18,7 +18,7 @@ use crate::config::Config;
 use crate::events::{OnModeSwitch, PostCommand};
 use crate::keymap::{KeymapResult, Keymaps};
 
-use super::app::{get_app, Application, EditorApps};
+use super::app::EditorApps;
 use super::EditorView;
 
 pub struct TabManager {
@@ -141,10 +141,7 @@ impl TabManager {
         self.tab_regions.clear();
 
         for i in 0..editor.apps.len() {
-            let app = match get_app(editor, i) {
-                Some(a) => a,
-                None => continue,
-            };
+            let app = &editor.apps[i];
             let name = app.name(editor);
             let is_active = i == editor.active_app;
 
@@ -238,12 +235,12 @@ impl TabManager {
 
         if area.width.saturating_sub(status_msg_width as u16) > key_width {
             let mut disp = String::new();
-            if let Some(dv) = editor.tabs.get(editor.active_tab) {
-                if let Some(count) = dv.count() {
+            if let Some(dv) = editor.active_doc_view() {
+                if let Some(count) = dv.count {
                     disp.push_str(&count.to_string());
                 }
             }
-            if let Some(app) = get_app(editor, editor.active_app) {
+            if let Some(app) = editor.apps.get(editor.active_app) {
                 disp.push_str(&app.pending_keys());
             }
 
@@ -260,38 +257,22 @@ impl TabManager {
 
     /// Clean up stale EditorView entries whose backing DocView no longer exists.
     fn cleanup_stale_shells(editor: &mut Editor) {
-        type AppBox = Box<dyn Application>;
-        let editor_tab_count = editor.tabs.len();
-
         if editor.apps.len() == 1 {
-            if let Some(a) = get_app(editor, 0) {
-                if a.as_any().downcast_ref::<super::welcome::WelcomePage>().is_some() {
-                    return;
-                }
+            if editor.apps[0].as_any().downcast_ref::<super::welcome::WelcomePage>().is_some() {
+                return;
             }
         }
 
-        editor.apps.retain(|app_any| {
-            if let Some(app) = app_any.downcast_ref::<AppBox>() {
-                if let Some(ev) = app.as_any().downcast_ref::<EditorView>() {
-                    return ev.tab_index < editor_tab_count;
-                }
+        // Remove EditorView apps whose DocView no longer exists
+        editor.apps.retain(|app| {
+            if let Some(ev) = app.as_any().downcast_ref::<EditorView>() {
+                return editor.doc_views.contains_key(&ev.id());
             }
             true
         });
 
-        let mut ev_idx = 0;
-        for app_any in &mut editor.apps {
-            if let Some(app) = app_any.downcast_mut::<AppBox>() {
-                if let Some(ev) = app.as_any_mut().downcast_mut::<EditorView>() {
-                    ev.tab_index = ev_idx;
-                    ev_idx += 1;
-                }
-            }
-        }
-
         if editor.apps.is_empty() {
-            editor.apps.push(Box::new(Box::new(super::welcome::WelcomePage::new()) as AppBox));
+            editor.apps.push(Box::new(super::welcome::WelcomePage::new()));
             editor.active_app = 0;
             return;
         }

@@ -66,8 +66,8 @@ impl Component for KeyMenu {
                 };
 
                 // Transfer count from active tab
-                cx.count = cx.editor.tabs.get(cx.editor.active_tab)
-                    .and_then(|t| t.count());
+                cx.count = cx.editor.active_doc_view()
+                    .and_then(|dv| dv.count);
 
                 let mode_before = cx.editor.mode();
                 cmd.execute(&mut cx);
@@ -83,8 +83,8 @@ impl Component for KeyMenu {
                 }
 
                 // Clear count after execution
-                if let Some(tab) = cx.editor.tabs.get_mut(cx.editor.active_tab) {
-                    tab.set_count(None);
+                if let Some(dv) = cx.editor.active_doc_view_mut() {
+                    dv.count = None;
                 }
 
                 let mut callbacks = std::mem::take(&mut cx.callback);
@@ -93,8 +93,11 @@ impl Component for KeyMenu {
                 // mirroring what EditorView does after command execution.
                 if !cx.editor.should_close() {
                     let config = cx.editor.config();
-                    let (view, doc) = current!(cx.editor);
-                    view.ensure_cursor_in_view(doc, config.scrolloff);
+                    if let Some(dv) = cx.editor.active_doc_view_mut() {
+                        let (doc, tree) = dv.doc_and_tree_mut();
+                        let view = tree.get_mut(tree.focus);
+                        view.ensure_cursor_in_view(doc, config.scrolloff);
+                    }
                 }
 
                 if !self.sticky {
@@ -120,8 +123,8 @@ impl Component for KeyMenu {
                     callback: Vec::new(),
                     jobs: ctx.jobs,
                 };
-                cx.count = cx.editor.tabs.get(cx.editor.active_tab)
-                    .and_then(|t| t.count());
+                cx.count = cx.editor.active_doc_view()
+                    .and_then(|dv| dv.count);
 
                 let mut last_mode = cx.editor.mode();
                 for cmd in cmds {
@@ -138,8 +141,8 @@ impl Component for KeyMenu {
                     last_mode = current_mode;
                 }
 
-                if let Some(tab) = cx.editor.tabs.get_mut(cx.editor.active_tab) {
-                    tab.set_count(None);
+                if let Some(dv) = cx.editor.active_doc_view_mut() {
+                    dv.count = None;
                 }
 
                 let mut callbacks = std::mem::take(&mut cx.callback);

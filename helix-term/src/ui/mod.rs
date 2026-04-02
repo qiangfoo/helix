@@ -520,7 +520,7 @@ pub mod completers {
     }
 
     pub fn buffer(editor: &Editor, input: &str) -> Vec<Completion> {
-        let names = std::iter::once(editor.tabs[editor.active_tab].doc()).map(|doc| {
+        let names = editor.active_doc_view().into_iter().map(|dv| &dv.doc).map(|doc| {
             doc.relative_path()
                 .map(|p| p.display().to_string().into())
                 .unwrap_or_else(|| Cow::from(SCRATCH_BUFFER_NAME))

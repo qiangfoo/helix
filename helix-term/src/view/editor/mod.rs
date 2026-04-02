@@ -2,14 +2,15 @@ mod config;
 
 pub use config::*;
 
+use crate::ui::app::Application;
 use crate::view::{
     document::Mode,
+    doc_view::DocView,
     events::DocumentFocusLost,
     graphics::{CursorKind, Rect},
     handlers::Handlers,
     info::Info,
     register::Registers,
-    tab::Tab,
     theme::{self, Theme},
     tree,
     Document, AppId, View, ViewId,
@@ -56,10 +57,13 @@ pub const DIR_STACK_CAP: usize = 10;
 type Diagnostics = BTreeMap<Uri, Vec<(lsp::Diagnostic, DiagnosticProvider)>>;
 
 pub struct EditorState {
-    /// Per-tab state: each tab owns a document, view tree, mode, etc.
-    pub tabs: Vec<Box<dyn Tab>>,
-    /// Index of the currently active tab.
-    pub active_tab: usize,
+    /// Application instances (the "tabs" in the UI).
+    pub apps: Vec<Box<dyn Application>>,
+    /// Index of the currently active application.
+    pub active_app: usize,
+
+    /// Document state indexed by AppId. Only EditorView apps have entries here.
+    pub doc_views: HashMap<AppId, DocView>,
 
     pub registers: Registers,
     pub language_servers: helix_lsp::Registry,
@@ -98,12 +102,6 @@ pub struct EditorState {
     /// Use `layer_state()` / `layer_state_mut()` for typed access.
     pub layer_state: Box<dyn std::any::Any>,
 
-    /// Application instances managed by helix-term.
-    /// Each element is a `Box<Box<dyn Application>>` erased to `Box<dyn Any>`.
-    pub apps: Vec<Box<dyn std::any::Any>>,
-    /// Index of the currently active application.
-    pub active_app: usize,
-
     /// Content area computed by the tab bar chrome layer.
     /// Excludes tab bar and commandline; applications render into this area.
     pub main_area: Rect,
@@ -122,6 +120,18 @@ impl EditorState {
         self.layer_state
             .downcast_mut::<T>()
             .expect("Editor.layer_state type mismatch")
+    }
+
+    /// Get the active app's DocView (immutable). Returns None if active app has no document.
+    pub fn active_doc_view(&self) -> Option<&DocView> {
+        let id = self.apps.get(self.active_app)?.id();
+        self.doc_views.get(&id)
+    }
+
+    /// Get the active app's DocView (mutable). Returns None if active app has no document.
+    pub fn active_doc_view_mut(&mut self) -> Option<&mut DocView> {
+        let id = self.apps.get(self.active_app)?.id();
+        self.doc_views.get_mut(&id)
     }
 }
 
@@ -188,8 +198,9 @@ impl EditorState {
         area.height -= 1;
 
         Self {
-            tabs: Vec::new(),
-            active_tab: 0,
+            apps: Vec::new(),
+            active_app: 0,
+            doc_views: HashMap::new(),
             theme: theme_loader.default(),
             language_servers,
             diagnostics: Diagnostics::new(),
@@ -215,8 +226,6 @@ impl EditorState {
             handlers,
             dir_stack: VecDeque::with_capacity(DIR_STACK_CAP),
             layer_state: Box::new(()),
-            apps: Vec::new(),
-            active_app: 0,
             main_area: Rect::default(),
         }
     }
@@ -244,67 +253,22 @@ impl EditorState {
             self.last_motion = Some(motion);
         }
     }
+
     /// Current editing mode for the [`EditorState`].
     pub fn mode(&self) -> Mode {
-        if self.tabs.is_empty() {
-            return Mode::Normal;
-        }
-        self.tabs[self.active_tab].mode()
+        self.active_doc_view().map_or(Mode::Normal, |dv| dv.mode)
     }
 
-    pub fn add_tab(&mut self, tab: Box<dyn Tab>) -> usize {
-        self.tabs.push(tab);
-        let index = self.tabs.len() - 1;
-        self.active_tab = index;
-        let doc_id = self.tabs[index].doc().id();
+    /// Insert a DocView for the given AppId and launch language servers.
+    pub fn add_doc_view(&mut self, app_id: AppId, dv: DocView) {
+        let doc_id = dv.doc.id();
+        self.doc_views.insert(app_id, dv);
         self.launch_language_servers(doc_id);
-        index
     }
 
-    pub fn close_tab(&mut self, index: usize) -> bool {
-        if index >= self.tabs.len() {
-            return self.tabs.is_empty();
-        }
-        self.tabs.remove(index);
-        if self.tabs.is_empty() {
-            return true;
-        }
-        if self.active_tab >= self.tabs.len() {
-            self.active_tab = self.tabs.len() - 1;
-        } else if self.active_tab > index {
-            self.active_tab -= 1;
-        }
-        false
-    }
-
-    pub fn next_tab(&mut self) {
-        if !self.tabs.is_empty() {
-            self.active_tab = (self.active_tab + 1) % self.tabs.len();
-        }
-    }
-
-    pub fn prev_tab(&mut self) {
-        if !self.tabs.is_empty() {
-            self.active_tab = if self.active_tab == 0 {
-                self.tabs.len() - 1
-            } else {
-                self.active_tab - 1
-            };
-        }
-    }
-
-    pub fn activate_tab(&mut self, index: usize) {
-        if index < self.tabs.len() {
-            self.active_tab = index;
-        }
-    }
-
-    pub fn tab_count(&self) -> usize {
-        self.tabs.len()
-    }
-
-    pub fn active_index(&self) -> usize {
-        self.active_tab
+    /// Remove the DocView for the given AppId.
+    pub fn remove_doc_view(&mut self, app_id: &AppId) -> Option<DocView> {
+        self.doc_views.remove(app_id)
     }
 
     pub fn config(&self) -> DynGuard<Config> {
@@ -468,15 +432,15 @@ impl EditorState {
         }
 
         // Check if the current doc matches the old path
-        let matches = self.tabs[self.active_tab].doc().path().map(|p| p == old_path).unwrap_or(false);
-        if matches {
-            let doc_id = self.tabs[self.active_tab].doc().id();
-            self.set_doc_path(doc_id, &new_path);
+        if let Some(dv) = self.active_doc_view() {
+            let matches = dv.doc.path().map(|p| p == old_path).unwrap_or(false);
+            if matches {
+                let doc_id = dv.doc.id();
+                self.set_doc_path(doc_id, &new_path);
+            }
         }
         let is_dir = new_path.is_dir();
         for ls in self.language_servers.iter_clients() {
-            // A new language server might have been started in `set_doc_path` and won't
-            // be initialized yet. Skip the `did_rename` notification for this server.
             if !ls.is_initialized() {
                 continue;
             }
@@ -492,24 +456,18 @@ impl EditorState {
     }
 
     pub fn set_doc_path(&mut self, doc_id: AppId, path: &Path) {
-        let doc = self.tabs[self.active_tab].doc_mut();
+        let dv = self.active_doc_view_mut().expect("no active doc view");
+        let doc = &mut dv.doc;
         let old_path = doc.path();
 
         if let Some(old_path) = old_path {
-            // sanity check, should not occur but some callers (like an LSP) may
-            // create bogus calls
             if old_path == path {
                 return;
             }
-            // if we are open in LSPs send did_close notification
             for language_server in doc.language_servers() {
                 language_server.text_document_did_close(doc.identifier());
             }
         }
-        // we need to clear the list of language servers here so that
-        // refresh_doc_language/refresh_language_servers doesn't resend
-        // text_document_did_close. Since we called `text_document_did_close`
-        // we have fully unregistered this document from its LS
         doc.language_servers.clear();
         doc.set_path(Some(path));
         doc.detect_editor_config();
@@ -518,15 +476,18 @@ impl EditorState {
 
     pub fn refresh_doc_language(&mut self, doc_id: AppId) {
         let loader = self.syn_loader.load();
-        let doc = self.tabs[self.active_tab].doc_mut();
-        doc.detect_language(&loader);
-        doc.detect_editor_config();
-        doc.detect_indent_and_line_ending();
+        let app_id = self.apps.get(self.active_app).map(|a| a.id());
+        if let Some(dv) = app_id.and_then(|id| self.doc_views.get_mut(&id)) {
+            dv.doc.detect_language(&loader);
+            dv.doc.detect_editor_config();
+            dv.doc.detect_indent_and_line_ending();
+        }
         self.refresh_language_servers(doc_id);
-        let doc = self.tabs[self.active_tab].doc_mut();
-        let diagnostics = EditorState::doc_diagnostics(&self.language_servers, &self.diagnostics, doc);
-        doc.replace_diagnostics(diagnostics, &[], None);
-        doc.reset_all_inlay_hints();
+        if let Some(dv) = app_id.and_then(|id| self.doc_views.get_mut(&id)) {
+            let diagnostics = EditorState::doc_diagnostics(&self.language_servers, &self.diagnostics, &dv.doc);
+            dv.doc.replace_diagnostics(diagnostics, &[], None);
+            dv.doc.reset_all_inlay_hints();
+        }
     }
 
     /// Launch a language server for a given document
@@ -534,8 +495,11 @@ impl EditorState {
         if !self.config().lsp.enable {
             return;
         }
-        // if doc doesn't have a URL it's a scratch buffer, ignore it
-        let doc = self.tabs[self.active_tab].doc_mut();
+        let dv = match self.active_doc_view_mut() {
+            Some(dv) => dv,
+            None => return,
+        };
+        let doc = &mut dv.doc;
         let Some(doc_url) = doc.url() else {
             return;
         };
@@ -543,7 +507,6 @@ impl EditorState {
         let config = doc.config.load();
         let root_dirs = &config.workspace_lsp_roots;
 
-        // store only successfully started language servers
         let language_servers = lang.as_ref().map_or_else(HashMap::default, |language| {
             self.language_servers
                 .get(language, path.as_ref(), root_dirs, false)
@@ -551,7 +514,6 @@ impl EditorState {
                     Ok(client) => Some((lang, client)),
                     Err(err) => {
                         if let helix_lsp::Error::ExecutableNotFound(err) = err {
-                            // Silence by default since some language servers might just not be installed
                             log::debug!(
                                 "Language server not found for `{}` {} {}", language.scope, lang, err,
                             );
@@ -569,13 +531,16 @@ impl EditorState {
                 .collect::<HashMap<_, _>>()
         });
 
+        // Re-borrow after language_servers access
+        let dv = self.active_doc_view_mut().expect("no active doc view");
+        let doc = &mut dv.doc;
+
         if language_servers.is_empty() && doc.language_servers.is_empty() {
             return;
         }
 
         let language_id = doc.language_id().map(ToOwned::to_owned).unwrap_or_default();
 
-        // only spawn new language servers if the servers aren't the same
         let doc_language_servers_not_in_registry =
             doc.language_servers.iter().filter(|(name, doc_ls)| {
                 language_servers
@@ -594,7 +559,6 @@ impl EditorState {
         });
 
         for (_, language_server) in language_servers_not_in_doc {
-            // TODO: this now races with on_init code if the init happens too quickly
             language_server.text_document_did_open(
                 doc_url.clone(),
                 doc.version(),
@@ -609,11 +573,12 @@ impl EditorState {
     /// Close a view by removing it from the tree.
     /// Returns `true` if the tree became empty (caller should close the tab via TabManager).
     pub fn close(&mut self, view_id: ViewId) -> bool {
-        if self.tabs.is_empty() {
-            return false;
-        }
-        self.tabs[self.active_tab].tree_mut().remove(view_id);
-        if self.tabs[self.active_tab].tree().views().count() == 0 {
+        let dv = match self.active_doc_view_mut() {
+            Some(dv) => dv,
+            None => return false,
+        };
+        dv.tree.remove(view_id);
+        if dv.tree.views().count() == 0 {
             true
         } else {
             self._refresh();
@@ -622,17 +587,17 @@ impl EditorState {
     }
 
     fn _refresh(&mut self) {
-        if self.tabs.is_empty() {
-            return;
-        }
         let config = self.config();
-        let tab = &mut self.tabs[self.active_tab];
+        let dv = match self.active_doc_view_mut() {
+            Some(dv) => dv,
+            None => return,
+        };
 
         if !config.lsp.display_inlay_hints {
-            tab.doc_mut().reset_all_inlay_hints();
+            dv.doc.reset_all_inlay_hints();
         }
 
-        let (doc, tree) = tab.doc_and_tree_mut();
+        let (doc, tree) = dv.doc_and_tree_mut();
         for (view, _) in tree.views_mut() {
             view.sync_changes(doc);
             view.gutters = config.gutters.clone();
@@ -641,19 +606,21 @@ impl EditorState {
     }
 
     pub fn resize(&mut self, area: Rect) {
-        if self.tabs.is_empty() {
-            return;
-        }
-        if self.tabs[self.active_tab].tree_mut().resize(area) {
+        let dv = match self.active_doc_view_mut() {
+            Some(dv) => dv,
+            None => return,
+        };
+        if dv.tree.resize(area) {
             self._refresh();
         };
     }
 
     pub fn focus(&mut self, view_id: ViewId) {
-        if self.tabs.is_empty() {
-            return;
-        }
-        if self.tabs[self.active_tab].tree().focus == view_id {
+        let dv = match self.active_doc_view() {
+            Some(dv) => dv,
+            None => return,
+        };
+        if dv.tree.focus == view_id {
             return;
         }
 
@@ -662,17 +629,18 @@ impl EditorState {
         self.ensure_cursor_in_view(view_id);
         // Update jumplist selections with new document changes.
         {
-            let (doc, tree) = self.tabs[self.active_tab].doc_and_tree_mut();
+            let dv = self.active_doc_view_mut().unwrap();
+            let (doc, tree) = dv.doc_and_tree_mut();
             for (view, _focused) in tree.views_mut() {
                 view.sync_changes(doc);
             }
         }
 
-        let tab = &mut self.tabs[self.active_tab];
-        let prev_id = std::mem::replace(&mut tab.tree_mut().focus, view_id);
-        tab.doc_mut().mark_as_focused();
+        let dv = self.active_doc_view_mut().unwrap();
+        let prev_id = std::mem::replace(&mut dv.tree.focus, view_id);
+        dv.doc.mark_as_focused();
 
-        let focus_lost = self.tabs[self.active_tab].tree().get(prev_id).doc;
+        let focus_lost = self.active_doc_view().unwrap().tree.get(prev_id).doc;
         dispatch(DocumentFocusLost {
             editor: self,
             doc: focus_lost,
@@ -680,28 +648,29 @@ impl EditorState {
     }
 
     pub fn focus_next(&mut self) {
-        let next = self.tabs[self.active_tab].tree().next();
+        let next = self.active_doc_view().unwrap().tree.next();
         self.focus(next);
     }
 
     pub fn focus_prev(&mut self) {
-        let prev = self.tabs[self.active_tab].tree().prev();
+        let prev = self.active_doc_view().unwrap().tree.prev();
         self.focus(prev);
     }
 
     pub fn focus_direction(&mut self, direction: tree::Direction) {
-        let current_view = self.tabs[self.active_tab].tree().focus;
-        if let Some(id) = self.tabs[self.active_tab].tree().find_split_in_direction(current_view, direction) {
+        let dv = self.active_doc_view().unwrap();
+        let current_view = dv.tree.focus;
+        if let Some(id) = dv.tree.find_split_in_direction(current_view, direction) {
             self.focus(id)
         }
     }
 
     pub fn swap_split_in_direction(&mut self, direction: tree::Direction) {
-        self.tabs[self.active_tab].tree_mut().swap_split_in_direction(direction);
+        self.active_doc_view_mut().unwrap().tree.swap_split_in_direction(direction);
     }
 
     pub fn transpose_view(&mut self) {
-        self.tabs[self.active_tab].tree_mut().transpose();
+        self.active_doc_view_mut().unwrap().tree.transpose();
     }
 
     pub fn should_close(&self) -> bool {
@@ -709,11 +678,12 @@ impl EditorState {
     }
 
     pub fn ensure_cursor_in_view(&mut self, id: ViewId) {
-        if self.tabs.is_empty() {
-            return;
-        }
         let config = self.config();
-        let (doc, tree) = self.tabs[self.active_tab].doc_and_tree_mut();
+        let dv = match self.active_doc_view_mut() {
+            Some(dv) => dv,
+            None => return,
+        };
+        let (doc, tree) = dv.doc_and_tree_mut();
         let view = tree.get(id);
         view.ensure_cursor_in_view(doc, config.scrolloff)
     }
@@ -774,17 +744,17 @@ impl EditorState {
     /// Gets the primary cursor position in screen coordinates,
     /// or `None` if the primary cursor is not visible on screen.
     pub fn cursor(&self) -> (Option<Position>, CursorKind) {
-        if self.tabs.is_empty() {
-            return (None, CursorKind::default());
-        }
+        let dv = match self.active_doc_view() {
+            Some(dv) => dv,
+            None => return (None, CursorKind::default()),
+        };
         let config = self.config();
-        let tab = &self.tabs[self.active_tab];
         let (view, doc) = current_ref!(self);
-        if let Some(mut pos) = tab.cursor_cache().get(view, doc) {
+        if let Some(mut pos) = dv.cursor_cache.get(view, doc) {
             let inner = view.inner_area(doc);
             pos.col += inner.x as usize;
             pos.row += inner.y as usize;
-            let cursorkind = config.cursor_shape.from_mode(tab.mode());
+            let cursorkind = config.cursor_shape.from_mode(dv.mode);
             (Some(pos), cursorkind)
         } else {
             (None, CursorKind::default())
@@ -797,8 +767,6 @@ impl EditorState {
         &self,
         timeout: Option<u64>,
     ) -> Result<(), tokio::time::error::Elapsed> {
-        // Remove all language servers from the file event handler.
-        // Note: this is non-blocking.
         for client in self.language_servers.iter_clients() {
             self.language_servers
                 .file_event_handler
@@ -818,8 +786,6 @@ impl EditorState {
     }
 
     pub async fn wait_event(&mut self) -> EditorEvent {
-        // the loop only runs once or twice and would be better implemented with a recursion + const generic
-        // however due to limitations with async functions that can not be implemented right now
         loop {
             tokio::select! {
                 biased;
@@ -855,12 +821,18 @@ impl EditorState {
     pub fn enter_normal_mode(&mut self) {
         use helix_core::graphemes;
 
-        if self.tabs[self.active_tab].mode() == Mode::Normal {
+        let dv = match self.active_doc_view_mut() {
+            Some(dv) => dv,
+            None => return,
+        };
+
+        if dv.mode == Mode::Normal {
             return;
         }
 
-        self.tabs[self.active_tab].set_mode(Mode::Normal);
-        let (view, doc) = current!(self);
+        dv.mode = Mode::Normal;
+        let (doc, tree) = dv.doc_and_tree_mut();
+        let view = tree.get_mut(tree.focus);
 
         // if leaving append mode, move cursor back by 1
         if doc.restore_cursor {
@@ -881,15 +853,12 @@ impl EditorState {
 
     /// Returns the id of a view that this doc contains a selection for,
     /// making sure it is synced with the current changes.
-    /// If possible or there are no selections returns current_view,
-    /// otherwise uses an arbitrary view.
     pub fn get_synced_view_id(&mut self, _id: AppId) -> ViewId {
-        let tab = &mut self.tabs[self.active_tab];
-        let focus = tab.tree().focus;
-        let (doc, tree) = tab.doc_and_tree_mut();
+        let dv = self.active_doc_view_mut().expect("no active doc view");
+        let focus = dv.tree.focus;
+        let (doc, tree) = dv.doc_and_tree_mut();
         let current_view = tree.get_mut(focus);
         if doc.selections().contains_key(&current_view.id) {
-            // only need to sync current view if this is not the current doc
             if current_view.doc != _id {
                 current_view.sync_changes(doc);
             }
@@ -916,13 +885,15 @@ impl EditorState {
     }
 
     pub fn jump_forward(&mut self, view_id: ViewId, count: usize) {
-        if let Some((doc_id, selection)) = self.tabs[self.active_tab].tree_mut().get_mut(view_id).jumps.forward(count).cloned() {
+        let dv = self.active_doc_view_mut().expect("no active doc view");
+        if let Some((doc_id, selection)) = dv.tree.get_mut(view_id).jumps.forward(count).cloned() {
             self.jump_to(view_id, doc_id, selection);
         }
     }
 
     pub fn jump_backward(&mut self, view_id: ViewId, count: usize) {
-        let (doc, tree) = self.tabs[self.active_tab].doc_and_tree_mut();
+        let dv = self.active_doc_view_mut().expect("no active doc view");
+        let (doc, tree) = dv.doc_and_tree_mut();
         let view = tree.get_mut(view_id);
         if let Some((doc_id, selection)) = view
             .jumps
@@ -935,19 +906,21 @@ impl EditorState {
 
     fn jump_to(&mut self, view_id: ViewId, _dest_doc_id: AppId, mut selection: Selection) {
         {
-            let (doc, tree) = self.tabs[self.active_tab].doc_and_tree_mut();
+            let dv = self.active_doc_view_mut().unwrap();
+            let (doc, tree) = dv.doc_and_tree_mut();
             let view = tree.get_mut(view_id);
             if let Some(transaction) = view.changes_to_sync(doc) {
                 let text = doc.text().slice(..);
                 selection = selection.map(transaction.changes()).ensure_invariants(text);
             }
         }
-        let tab = &mut self.tabs[self.active_tab];
-        let focus = tab.tree().focus;
-        let (doc, tree) = tab.doc_and_tree_mut();
+        let scrolloff = self.config.load().scrolloff;
+        let dv = self.active_doc_view_mut().unwrap();
+        let focus = dv.tree.focus;
+        let (doc, tree) = dv.doc_and_tree_mut();
         let view = tree.get_mut(focus);
         doc.set_selection(view_id, selection);
-        view.ensure_cursor_in_view_center(doc, self.config.load().scrolloff);
+        view.ensure_cursor_in_view_center(doc, scrolloff);
     }
 }
 
